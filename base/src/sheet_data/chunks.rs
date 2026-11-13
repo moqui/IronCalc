@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use bitcode::{Decode, Encode};
 
-use super::row::Row;
+use super::row::{Constant, Peek, Row};
 use crate::constants::LAST_ROW;
 use crate::types::Cell;
 
@@ -281,7 +281,49 @@ impl SheetData {
                 let last = Row::offset(*row_first_column, values, last_column)?;
                 values.get(first..=last)
             }
-            Row::Cells(_) => None,
+            Row::Cells(_) | Row::Constants { .. } => None,
+        }
+    }
+
+    /// What is at a position, for a quick look: the constant itself if the
+    /// row holds the position as one, the cell borrowed if it holds it as a
+    /// cell. Unlike `cell` it never makes a cell to hand out.
+    #[inline]
+    pub(crate) fn peek(&self, row: i32, column: i32) -> Peek<'_> {
+        match self.row(row) {
+            Some(row_data) => row_data.peek(column),
+            None => Peek::Nothing,
+        }
+    }
+
+    /// The constants of a row from `first_column` to `last_column`, if the
+    /// row holds nothing but constants, with the column of the first of them;
+    /// a gap is `Constant::Absent`. The columns of the stretch beyond the
+    /// slice, on either side, hold no cell. `None` is no news about the row:
+    /// its cells say what it holds.
+    #[inline]
+    pub(crate) fn constants_in_row_between(
+        &self,
+        row: i32,
+        first_column: i32,
+        last_column: i32,
+    ) -> Option<(i32, &[Constant])> {
+        match self.row(row)? {
+            Row::Constants {
+                first_column: row_first_column,
+                cells,
+            } => {
+                let row_last_column = *row_first_column as i64 + cells.len() as i64 - 1;
+                let from = (first_column as i64).max(*row_first_column as i64);
+                let to = (last_column as i64).min(row_last_column);
+                if from > to {
+                    return Some((first_column, &[]));
+                }
+                let start = (from - *row_first_column as i64) as usize;
+                let end = (to - *row_first_column as i64) as usize;
+                Some((from as i32, &cells[start..=end]))
+            }
+            Row::Cells(_) | Row::Numbers { .. } => None,
         }
     }
 

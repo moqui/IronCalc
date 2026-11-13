@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
 
+use crate::sheet_data::{Constant, Peek};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1839,15 +1840,20 @@ impl<'a> Model<'a> {
             let sheet_data = &self.workbook.worksheets[sheet as usize].sheet_data;
             if first_column == last_column {
                 // A column of a range: one cell of the row, found in one go
-                let cell = sheet_data.cell(row, first_column);
-                let value = match cell.as_deref() {
-                    Some(Cell::NumberCell { v, .. }) => Some(RangeValue::Number(*v)),
-                    Some(Cell::BooleanCell { v, .. }) => Some(RangeValue::Boolean(*v)),
-                    Some(Cell::SharedString { si, .. }) => self
-                        .workbook
-                        .shared_strings
-                        .get(*si as usize)
-                        .map(|s| RangeValue::Text(s.as_str())),
+                let shared_strings = &self.workbook.shared_strings;
+                let text = |si: i32| {
+                    shared_strings
+                        .get(si as usize)
+                        .map(|s| RangeValue::Text(s.as_str()))
+                };
+                let value = match sheet_data.peek(row, first_column) {
+                    Peek::Number(v)
+                    | Peek::Constant(&Constant::Number { v, .. })
+                    | Peek::Cell(&Cell::NumberCell { v, .. }) => Some(RangeValue::Number(v)),
+                    Peek::Constant(&Constant::Boolean { v, .. })
+                    | Peek::Cell(&Cell::BooleanCell { v, .. }) => Some(RangeValue::Boolean(v)),
+                    Peek::Constant(&Constant::Text { si, .. })
+                    | Peek::Cell(&Cell::SharedString { si, .. }) => text(si),
                     _ => None,
                 };
                 if let Some(value) = value {
@@ -1926,9 +1932,72 @@ impl<'a> Model<'a> {
             return Some((column, last_column + 1));
         }
         let shared_strings = &self.workbook.shared_strings;
-        let mut cells = self.workbook.worksheets[sheet as usize]
-            .sheet_data
-            .cells_in_row_between(row, column, last_column);
+        let sheet_data = &self.workbook.worksheets[sheet as usize].sheet_data;
+        if let Some((first, constants)) =
+            sheet_data.constants_in_row_between(row, column, last_column)
+        {
+            // A row of constants holds nothing to evaluate, and nothing that
+            // has to be made into a cell to be read
+            let language = self.language;
+            let mut at = column;
+            let mut visit_empty = |at: i32, visit: &mut dyn FnMut(RangeValue<'_>) -> bool| {
+                evaluation.record_seen(
+                    CellReferenceIndex {
+                        sheet,
+                        row,
+                        column: at,
+                    },
+                    Seen::Empty,
+                );
+                visit(RangeValue::Empty)
+            };
+            while at < first {
+                if !visit_empty(at, visit) {
+                    return None;
+                }
+                at += 1;
+            }
+            for constant in constants {
+                let going_on = match constant {
+                    Constant::Absent | Constant::Empty { .. } => visit_empty(at, visit),
+                    Constant::Number { v, .. } => visit(RangeValue::Number(*v)),
+                    Constant::Boolean { v, .. } => visit(RangeValue::Boolean(*v)),
+                    Constant::Text { si, .. } => match shared_strings.get(*si as usize) {
+                        Some(text) => visit(RangeValue::Text(text)),
+                        None => visit(RangeValue::Error(CalcResult::new_error(
+                            Error::ERROR,
+                            CellReferenceIndex {
+                                sheet,
+                                row,
+                                column: at,
+                            },
+                            "Invalid shared string".to_string(),
+                        ))),
+                    },
+                    Constant::Error { ei, .. } => visit(RangeValue::Error(CalcResult::new_error(
+                        ei.clone(),
+                        CellReferenceIndex {
+                            sheet,
+                            row,
+                            column: at,
+                        },
+                        ei.to_localized_error_string(language),
+                    ))),
+                };
+                if !going_on {
+                    return None;
+                }
+                at += 1;
+            }
+            while at <= last_column {
+                if !visit_empty(at, visit) {
+                    return None;
+                }
+                at += 1;
+            }
+            return Some((last_column + 1, last_column + 1));
+        }
+        let mut cells = sheet_data.cells_in_row_between(row, column, last_column);
         let mut next = column;
         // A position without a cell holds nothing, like an empty cell.
         let mut read_empty = |from: i32, to: i32, visit: &mut dyn FnMut(RangeValue<'_>) -> bool| {

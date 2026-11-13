@@ -4,6 +4,7 @@ use crate::constants::{LAST_COLUMN, LAST_ROW};
 use crate::evaluation::KeyBuild;
 use crate::expressions::types::CellReferenceIndex;
 use crate::functions::util::build_criteria;
+use crate::sheet_data::{Constant, Peek};
 use crate::{
     calc_result::{CalcResult, Range},
     expressions::parser::{ArrayNode, Node},
@@ -50,16 +51,25 @@ impl<'a> Model<'a> {
         // While a pass is being abandoned nothing is read: `evaluate_cell`
         // knows what to answer.
         if self.evaluation.restart.is_none() && !self.evaluation.unwinding {
-            match self.fetch_cell(position).as_deref() {
-                Some(Cell::NumberCell { v, .. }) => return criterion(&CalcResult::Number(*v)),
-                Some(Cell::BooleanCell { v, .. }) => return criterion(&CalcResult::Boolean(*v)),
-                Some(Cell::SharedString { si, .. }) => {
-                    if let Some(verdict) = texts.get(si) {
+            let sheet_data = &self.workbook.worksheets[position.sheet as usize].sheet_data;
+            match sheet_data.peek(position.row, position.column) {
+                Peek::Number(v)
+                | Peek::Constant(&Constant::Number { v, .. })
+                | Peek::Cell(&Cell::NumberCell { v, .. }) => {
+                    return criterion(&CalcResult::Number(v))
+                }
+                Peek::Constant(&Constant::Boolean { v, .. })
+                | Peek::Cell(&Cell::BooleanCell { v, .. }) => {
+                    return criterion(&CalcResult::Boolean(v))
+                }
+                Peek::Constant(&Constant::Text { si, .. })
+                | Peek::Cell(&Cell::SharedString { si, .. }) => {
+                    if let Some(verdict) = texts.get(&si) {
                         return *verdict;
                     }
-                    if let Some(text) = self.workbook.shared_strings.get(*si as usize) {
+                    if let Some(text) = self.workbook.shared_strings.get(si as usize) {
                         let verdict = criterion(&CalcResult::String(text.clone()));
-                        texts.insert(*si, verdict);
+                        texts.insert(si, verdict);
                         return verdict;
                     }
                 }

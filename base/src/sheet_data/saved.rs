@@ -31,7 +31,7 @@ impl Encoder<Row> for RowEncoder {
     fn encode(&mut self, row: &Row) {
         match row {
             Row::Cells(cells) => self.0.encode(cells),
-            Row::Numbers { .. } => self.0.encode(&row.to_cells()),
+            Row::Numbers { .. } | Row::Constants { .. } => self.0.encode(&row.to_cells()),
         }
     }
 }

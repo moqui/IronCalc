@@ -20,6 +20,13 @@
 //! the spot when it holds a number. Writing anything else into the row turns
 //! it into a row of cells; nothing but `set_row` turns it back.
 //!
+//! A row whose cells hold no formula, numbers and texts as a table read from
+//! a database has them, is held as its constants: sixteen bytes for each,
+//! by column with a gap held as a constant too, where a cell of any kind
+//! takes the 48 the kinds that hold a formula need. A row of 20 such cells
+//! is 320 bytes instead of 1,120. Its cells are made on the spot as well,
+//! and a formula written into it makes it a row of cells.
+//!
 //! ```text
 //!   chunks ──► [ chunk 0 | (none) | chunk 2 | ... ]        row >> CHUNK_BITS
 //!                  │
@@ -43,3 +50,4 @@ mod saved;
 mod test;
 
 pub use chunks::{SheetData, UsedArea};
+pub(crate) use row::{Constant, Peek};

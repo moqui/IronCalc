@@ -636,3 +636,124 @@ fn a_cell_is_found_with_gaps_before_it_or_without() {
     data.set_cell(2, 4, number(1.0));
     assert_eq!(data.columns_in_row(2)[..3], [3, 4, 6]);
 }
+
+fn is_constants(data: &SheetData, row: i32) -> bool {
+    matches!(data.row(row), Some(Row::Constants { .. }))
+}
+
+#[test]
+fn a_constant_is_small() {
+    // A sheet of data with texts in it costs this much per cell
+    assert!(std::mem::size_of::<super::Constant>() <= 16);
+}
+
+#[test]
+fn a_row_of_values_is_held_as_constants() {
+    let mut data = SheetData::new();
+    let cells = vec![
+        (2, number(1.5)),
+        (3, text(7)),
+        (4, Cell::BooleanCell { v: true, s: 3 }),
+        // a gap at 5
+        (6, Cell::EmptyCell { s: 4 }),
+        (
+            7,
+            Cell::ErrorCell {
+                ei: crate::expressions::token::Error::NA,
+                s: 0,
+            },
+        ),
+    ];
+    data.set_row(1, cells.clone());
+    assert!(is_constants(&data, 1));
+    let read: Vec<(i32, Cell)> = data
+        .cells_in_row(1)
+        .into_iter()
+        .map(|(c, cell)| (c, cell.into_owned()))
+        .collect();
+    assert_eq!(read, cells);
+    assert_eq!(data.cell(1, 5), None);
+    assert_eq!(data.cell(1, 1), None);
+    assert_eq!(data.cell(1, 8), None);
+    assert_eq!(data.columns_in_row(1), vec![2, 3, 4, 6, 7]);
+    // equal to the same cells held as cells
+    let mut other = SheetData::new();
+    for (column, cell) in &cells {
+        other.set_cell(1, *column, cell.clone());
+    }
+    assert_eq!(data, other);
+    // saved as cells, as a row always was
+    let mut as_cells = SheetData::new();
+    as_cells.set_row(1, cells.clone());
+    assert_eq!(bitcode::encode(&data), bitcode::encode(&as_cells));
+    let read_back: SheetData = bitcode::decode(&bitcode::encode(&data)).unwrap();
+    assert!(is_constants(&read_back, 1));
+    assert_eq!(read_back, data);
+
+    // too many gaps for their cells: a row of cells
+    data.set_row(2, vec![(1, text(1)), (100, text(2))]);
+    assert!(!is_constants(&data, 2));
+    assert_eq!(data.columns_in_row(2), vec![1, 100]);
+}
+
+#[test]
+fn a_row_of_constants_stays_one_only_while_it_can() {
+    let mut data = SheetData::new();
+    data.set_row(1, vec![(3, text(1)), (4, number(2.0)), (5, text(2))]);
+    assert!(is_constants(&data, 1));
+    // replaced, put in a gap, after the end and before the start
+    assert_eq!(data.set_cell(1, 4, text(9)), Some(number(2.0)));
+    assert_eq!(data.set_cell(1, 7, number(1.0)), None);
+    assert_eq!(data.set_cell(1, 6, number(6.0)), None);
+    assert_eq!(data.set_cell(1, 1, text(3)), None);
+    assert!(is_constants(&data, 1));
+    assert_eq!(data.columns_in_row(1), vec![1, 3, 4, 5, 6, 7]);
+    assert_eq!(data.cell(1, 2), None);
+    assert_eq!(data.cell(1, 4).as_deref(), Some(&text(9)));
+    // removed from the ends, the gaps go with them
+    assert_eq!(data.remove_cell(1, 1), Some(text(3)));
+    assert_eq!(data.remove_cell(1, 7), Some(number(1.0)));
+    assert_eq!(data.remove_cell(1, 2), None);
+    assert!(is_constants(&data, 1));
+    assert_eq!(data.columns_in_row(1), vec![3, 4, 5, 6]);
+    assert_eq!(
+        data.used_area()
+            .map(|area| (area.min_column, area.max_column)),
+        Some((3, 6))
+    );
+    // far beyond the end: a row of cells
+    data.set_cell(1, 500, text(4));
+    assert!(!is_constants(&data, 1));
+    assert_eq!(data.columns_in_row(1), vec![3, 4, 5, 6, 500]);
+
+    // a formula makes it a row of cells, with the others as they were
+    data.set_row(2, vec![(1, text(1)), (2, number(2.0))]);
+    data.set_cell(2, 3, Cell::new_formula(0, 0));
+    assert!(!is_constants(&data, 2));
+    assert_eq!(data.cell(2, 1).as_deref(), Some(&text(1)));
+    assert_eq!(data.cell(2, 3).as_deref(), Some(&Cell::new_formula(0, 0)));
+    // and so does changing a cell in place
+    data.set_row(3, vec![(1, text(1)), (2, number(2.0))]);
+    *data.cell_mut(3, 2).unwrap() = number(3.0);
+    assert!(!is_constants(&data, 3));
+    assert_eq!(data.cell(3, 2).as_deref(), Some(&number(3.0)));
+
+    // a row of numbers given a text becomes a row of constants
+    data.set_row(4, vec![(1, number(1.0)), (2, number(2.0))]);
+    assert!(is_numbers(&data, 4));
+    data.set_cell(4, 3, text(5));
+    assert!(is_constants(&data, 4));
+    assert_eq!(data.columns_in_row(4), vec![1, 2, 3]);
+    // an empty row given a text starts as one
+    data.set_cell(5, 9, text(6));
+    assert!(is_constants(&data, 5));
+    // the last cell taken, the row goes
+    data.remove_cell(5, 9);
+    assert!(!data.rows().contains(&5));
+
+    // columns move
+    data.set_row(6, vec![(2, text(1)), (4, number(2.0))]);
+    data.displace_columns(3, 2);
+    assert_eq!(data.columns_in_row(6), vec![2, 6]);
+    assert_eq!(data.cell(6, 6).as_deref(), Some(&number(2.0)));
+}
