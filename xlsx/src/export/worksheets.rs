@@ -138,7 +138,19 @@ fn get_tooltip_attribute(tooltip: &Option<String>) -> String {
 
 /// The rels part of the worksheet (`xl/worksheets/_rels/sheetN.xml.rels`) holding one
 /// relationship per external link, or `None` if the worksheet has no external links.
-pub(crate) fn get_worksheet_xml_rels(worksheet: &Worksheet) -> Option<String> {
+/// The relationship id of the sheet's drawing part, after its links'.
+pub(crate) fn get_drawing_rel_id(worksheet: &Worksheet) -> usize {
+    get_sorted_links(worksheet)
+        .iter()
+        .filter(|(_, link)| matches!(link, Link::External { .. }))
+        .count()
+        + 1
+}
+
+pub(crate) fn get_worksheet_xml_rels(
+    worksheet: &Worksheet,
+    drawing_number: Option<usize>,
+) -> Option<String> {
     let mut relationships_str: Vec<String> = vec![];
     let mut rel_id = 0;
     for (_, link) in get_sorted_links(worksheet) {
@@ -149,6 +161,12 @@ pub(crate) fn get_worksheet_xml_rels(worksheet: &Worksheet) -> Option<String> {
                 "<Relationship Id=\"rId{rel_id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{target}\" TargetMode=\"External\"/>"
             ));
         }
+    }
+    if let Some(number) = drawing_number {
+        rel_id += 1;
+        relationships_str.push(format!(
+            "<Relationship Id=\"rId{rel_id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing{number}.xml\"/>"
+        ));
     }
     if relationships_str.is_empty() {
         return None;
@@ -203,7 +221,12 @@ pub(crate) fn get_worksheet_xml(
     dimension: &str,
     is_sheet_selected: bool,
     selected_cell: (i32, i32),
+    drawing_rel_id: Option<usize>,
 ) -> String {
+    let drawing = match drawing_rel_id {
+        Some(id) => format!("<drawing r:id=\"rId{id}\"/>"),
+        None => String::new(),
+    };
     let mut sheet_data_str: Vec<String> = vec![];
     let mut cols_str: Vec<String> = vec![];
     let mut merged_cells_str: Vec<String> = vec![];
@@ -744,6 +767,7 @@ pub(crate) fn get_worksheet_xml(
   {merge_cells_section}\
   {cf_sections}\
   {hyperlinks_section}\
+  {drawing}\
   {cf_ext_lst}\
 </worksheet>"
     )

@@ -3,6 +3,7 @@
 mod _rels;
 mod conditional_formatting;
 mod doc_props;
+mod drawings;
 mod dxfs_styles;
 mod escape;
 mod shared_strings;
@@ -31,14 +32,47 @@ use crate::error::XlsxError;
 #[cfg(test)]
 mod test;
 
-fn get_content_types_xml(workbook: &Workbook) -> String {
+fn get_content_types_xml(
+    workbook: &Workbook,
+    sheet_drawings: &[Option<drawings::SheetDrawings>],
+) -> String {
     // A list of all files in the zip
     let mut content = vec![
         r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#.to_string(),
         r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#.to_string(),
         r#"<Default Extension="xml" ContentType="application/xml"/>"#.to_string(),
-        r#"<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#.to_string(),
     ];
+    // The images, by the extension of their names
+    let mut extensions: Vec<(&str, &str)> = Vec::new();
+    for media in &workbook.media {
+        if let Some((_, extension)) = media.name.rsplit_once('.') {
+            if !extensions.iter().any(|(e, _)| *e == extension) {
+                extensions.push((extension, &media.content_type));
+            }
+        }
+    }
+    for (extension, content_type) in extensions {
+        content.push(format!(
+            r#"<Default Extension="{}" ContentType="{}"/>"#,
+            escape::escape_xml(extension),
+            escape::escape_xml(content_type)
+        ));
+    }
+    content.extend([
+
+        r#"<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#.to_string(),
+    ]);
+    for parts in sheet_drawings.iter().flatten() {
+        content.push(format!(
+            r#"<Override PartName="/xl/drawings/drawing{}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>"#,
+            parts.number
+        ));
+        for (number, _) in &parts.charts {
+            content.push(format!(
+                r#"<Override PartName="/xl/charts/chart{number}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#
+            ));
+        }
+    }
     for worksheet in 0..workbook.worksheets.len() {
         let sheet = format!(
             r#"<Override PartName="/xl/worksheets/sheet{}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#,
@@ -97,8 +131,9 @@ pub fn save_xlsx_to_writer<W: Write + Seek>(model: &Model, writer: W) -> Result<
     let options = zip::write::SimpleFileOptions::default();
 
     // root folder
+    let sheet_drawings = drawings::get_sheet_drawings(workbook);
     zip.start_file("[Content_Types].xml", options)?;
-    zip.write_all(get_content_types_xml(workbook).as_bytes())?;
+    zip.write_all(get_content_types_xml(workbook, &sheet_drawings).as_bytes())?;
 
     zip.add_directory("docProps", options)?;
     zip.start_file("docProps/app.xml", options)?;
@@ -135,7 +170,10 @@ pub fn save_xlsx_to_writer<W: Write + Seek>(model: &Model, writer: W) -> Result<
     // sheet rels parts (one per sheet with external hyperlinks)
     let mut has_worksheet_rels = false;
     for (sheet_index, worksheet) in workbook.worksheets.iter().enumerate() {
-        if let Some(rels_xml) = worksheets::get_worksheet_xml_rels(worksheet) {
+        let drawing_number = sheet_drawings[sheet_index]
+            .as_ref()
+            .map(|parts| parts.number);
+        if let Some(rels_xml) = worksheets::get_worksheet_xml_rels(worksheet, drawing_number) {
             if !has_worksheet_rels {
                 zip.add_directory("xl/worksheets/_rels", options)?;
                 has_worksheet_rels = true;
@@ -172,9 +210,45 @@ pub fn save_xlsx_to_writer<W: Write + Seek>(model: &Model, writer: W) -> Result<
                 sheet_dimension_str,
                 is_sheet_selected,
                 selected_cell,
+                sheet_drawings[sheet_index]
+                    .as_ref()
+                    .map(|_| worksheets::get_drawing_rel_id(worksheet)),
             )
             .as_bytes(),
         )?;
+    }
+
+    // The images, and the drawings and charts of the sheets
+    if !workbook.media.is_empty() {
+        zip.add_directory("xl/media", options)?;
+        for media in &workbook.media {
+            zip.start_file(format!("xl/media/{}", media.name), options)?;
+            zip.write_all(&media.bytes)?;
+        }
+    }
+    if sheet_drawings.iter().any(Option::is_some) {
+        zip.add_directory("xl/drawings", options)?;
+        zip.add_directory("xl/drawings/_rels", options)?;
+        let has_charts = sheet_drawings
+            .iter()
+            .flatten()
+            .any(|parts| !parts.charts.is_empty());
+        if has_charts {
+            zip.add_directory("xl/charts", options)?;
+        }
+        for parts in sheet_drawings.iter().flatten() {
+            zip.start_file(format!("xl/drawings/drawing{}.xml", parts.number), options)?;
+            zip.write_all(parts.xml.as_bytes())?;
+            zip.start_file(
+                format!("xl/drawings/_rels/drawing{}.xml.rels", parts.number),
+                options,
+            )?;
+            zip.write_all(parts.rels.as_bytes())?;
+            for (number, xml) in &parts.charts {
+                zip.start_file(format!("xl/charts/chart{number}.xml"), options)?;
+                zip.write_all(xml.as_bytes())?;
+            }
+        }
     }
 
     let writer = zip.finish()?;
