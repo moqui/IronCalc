@@ -187,7 +187,7 @@ pub fn save_to_icalc(model: &Model, file_name: &str) -> Result<(), XlsxError> {
     if file_path.exists() {
         return Err(XlsxError::IO(format!("file {file_name} already exists")));
     }
-    let s = bitcode::encode(&model.workbook);
+    let s = ironcalc_base::stored::workbook_to_bytes(&model.workbook);
     let mut file = fs::File::create(file_path)?;
     file.write_all(&s)?;
 

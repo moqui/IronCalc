@@ -196,7 +196,7 @@ pub fn load_from_xlsx<'a>(
 pub fn load_from_icalc<'a>(file_name: &str, language_id: &'a str) -> Result<Model<'a>, XlsxError> {
     let contents = fs::read(file_name)
         .map_err(|e| XlsxError::IO(format!("Could not extract workbook name: {e}")))?;
-    let workbook: Workbook = bitcode::decode(&contents)
+    let workbook = ironcalc_base::stored::workbook_from_bytes(&contents)
         .map_err(|e| XlsxError::IO(format!("Failed to decode file: {e}")))?;
     Model::from_workbook(workbook, language_id).map_err(XlsxError::Workbook)
 }

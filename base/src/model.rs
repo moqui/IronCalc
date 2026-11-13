@@ -2186,8 +2186,7 @@ impl<'a> Model<'a> {
     /// See also:
     /// * [Model::to_bytes]
     pub fn from_bytes(s: &[u8], language_id: &'a str) -> Result<Model<'a>, String> {
-        let workbook: Workbook =
-            bitcode::decode(s).map_err(|e| format!("Error parsing workbook: {e}"))?;
+        let workbook = crate::stored::workbook_from_bytes(s)?;
         Model::from_workbook(workbook, language_id)
     }
 
@@ -3926,7 +3925,7 @@ impl<'a> Model<'a> {
     /// See also:
     /// * [Model::from_bytes]
     pub fn to_bytes(&self) -> Vec<u8> {
-        bitcode::encode(&self.workbook)
+        crate::stored::workbook_to_bytes(&self.workbook)
     }
 
     /// Returns data about the worksheets
