@@ -21,6 +21,8 @@ fn memory_usage_counts_the_cells_of_each_sheet_and_the_texts() {
     assert!(usage.shared_strings >= 50 * "Customer 10".len());
     assert_eq!(
         usage.total(),
-        usage.sheets.iter().sum::<usize>() + usage.shared_strings
+        usage.sheets.iter().sum::<usize>() + usage.shared_strings + usage.dependencies
     );
+    // the one formula's read of the 50 rows
+    assert!(usage.dependencies > 0);
 }

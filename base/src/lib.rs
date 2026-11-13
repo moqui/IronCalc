@@ -54,6 +54,7 @@ mod cast;
 mod conditional_formatting;
 mod constants;
 mod cut_paste;
+mod dependencies;
 mod evaluation;
 mod functions;
 mod implicit_intersection;
@@ -73,6 +74,7 @@ mod test;
 #[cfg(any(test, feature = "mock_time"))]
 pub mod mock_time;
 
+pub use evaluation::EvaluationChanges;
 pub use locale::get_supported_locales;
 pub use merged_cells::MergeStructure;
 pub use model::get_milliseconds_since_epoch;

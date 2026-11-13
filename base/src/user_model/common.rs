@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt::Debug};
 
 use serde::{Deserialize, Serialize};
 
+use crate::evaluation::EvaluationChanges;
 use crate::{
     cf_types::ExtendedStyle,
     constants::{LAST_COLUMN, LAST_ROW},
@@ -216,6 +217,8 @@ pub struct UserModel<'a> {
     history: History,
     send_queue: Vec<QueueDiffs>,
     pause_evaluation: bool,
+    /// What the last evaluation changed.
+    last_changes: EvaluationChanges,
     /// What the user is looking at: selected sheet, selection and scroll
     /// position of each sheet, window size. Runtime state only: it is not
     /// part of the workbook and is not serialized.
@@ -257,6 +260,7 @@ impl<'a> UserModel<'a> {
             history: History::default(),
             send_queue: vec![],
             pause_evaluation: false,
+            last_changes: EvaluationChanges::default(),
             view: WorkbookView::default(),
         };
         user_model.apply_focus_on_open();
@@ -279,6 +283,7 @@ impl<'a> UserModel<'a> {
             history: History::default(),
             send_queue: vec![],
             pause_evaluation: false,
+            last_changes: EvaluationChanges::default(),
             view: WorkbookView::default(),
         })
     }
@@ -381,13 +386,22 @@ impl<'a> UserModel<'a> {
         self.pause_evaluation = false;
     }
 
-    /// Forces an evaluation of the model
+    /// Evaluates what changed since the last evaluation, as every edit
+    /// does when evaluation is not paused: see [Model::evaluate_changes].
+    /// What it changed is then [UserModel::last_changes].
     ///
     /// See also:
     /// * [Model::evaluate]
     /// * [UserModel::pause_evaluation]
     pub fn evaluate(&mut self) {
-        self.model.evaluate()
+        self.last_changes = self.model.evaluate_changes();
+    }
+
+    /// What the last evaluation changed: the cells written since the one
+    /// before and the formulas whose value changed, or that anything may
+    /// have. A view of the workbook redraws those and nothing else.
+    pub fn last_changes(&self) -> &EvaluationChanges {
+        &self.last_changes
     }
 
     /// Returns the list of pending diffs and removes them from the queue
@@ -2338,7 +2352,7 @@ impl<'a> UserModel<'a> {
 
     pub(super) fn evaluate_if_not_paused(&mut self) {
         if !self.pause_evaluation {
-            self.model.evaluate();
+            self.evaluate();
         }
     }
 }

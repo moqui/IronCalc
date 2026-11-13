@@ -2307,6 +2307,24 @@ impl Function {
     pub(crate) fn returns_reference(&self) -> bool {
         matches!(self, Function::Indirect | Function::Offset)
     }
+
+    /// Whether the function gives another result in another evaluation with
+    /// nothing changed: the clock, chance, and what it says about the
+    /// workbook and the system. A formula that calls one runs in every
+    /// evaluation (see `Model::evaluate_changes`). INDIRECT and OFFSET are
+    /// not: the cells their references come to are recorded as read.
+    pub(crate) fn is_volatile(&self) -> bool {
+        matches!(
+            self,
+            Function::Now
+                | Function::Today
+                | Function::Rand
+                | Function::Randbetween
+                | Function::Randarray
+                | Function::Info
+                | Function::Cell
+        )
+    }
 }
 
 impl<'a> Model<'a> {

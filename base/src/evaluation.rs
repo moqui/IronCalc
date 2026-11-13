@@ -44,9 +44,12 @@ use std::sync::Arc;
 
 use crate::calc_result::CalcResult;
 use crate::constants::{LAST_COLUMN, LAST_ROW};
+use crate::dependencies::Rect;
 use crate::expressions::token::Error;
+use crate::expressions::types::Area;
 use crate::expressions::types::CellReferenceIndex;
 use crate::model::Model;
+use crate::sheet_data::Changes;
 use crate::types::{ArrayKind, Cell, Worksheet};
 
 /// The hasher of the maps the evaluation keeps about positions. Their keys are
@@ -408,6 +411,9 @@ pub(crate) struct Evaluation {
     pub(crate) record_reads: bool,
     /// Number of restarts the last `evaluate()` needed. For tests and tuning.
     pub(crate) restarts_in_last_evaluation: u32,
+    /// Formulas run since the evaluation began, replays and restarts
+    /// included.
+    pub(crate) formulas_run: usize,
     /// Number of formulas running right now, that is the depth of the
     /// recursion. It can be smaller than `stack.len()`: see `unwinding`.
     pub(crate) depth: usize,
@@ -471,6 +477,7 @@ impl Default for Evaluation {
             in_pass: false,
             record_reads: false,
             restarts_in_last_evaluation: 0,
+            formulas_run: 0,
             depth: 0,
             max_depth: default_max_depth(),
             max_stack: DEFAULT_MAX_STACK,
@@ -517,6 +524,7 @@ impl<'a> Model<'a> {
     /// `#CIRC!` and keeps no spill cells: its stale cells are dropped when it
     /// is marked, so there is nothing of it to read or to contradict.
     pub fn evaluate(&mut self) {
+        self.evaluation.formulas_run = 0;
         let Survey {
             formulas,
             dynamic_anchors,
@@ -549,7 +557,254 @@ impl<'a> Model<'a> {
             self.restore_dynamic_spills(&spills_before);
         }
         self.evaluation.restarts_in_last_evaluation = log.restarts;
+        self.dependencies.index_all();
         self.evaluate_conditional_formatting();
+        // What the evaluation wrote is not news to the next one
+        self.take_changes();
+    }
+
+    /// What has been written to the sheets since the last evaluation, by
+    /// sheet, and a fresh record.
+    fn take_changes(&mut self) -> Vec<Changes> {
+        self.workbook
+            .worksheets
+            .iter_mut()
+            .map(|worksheet| worksheet.sheet_data.take_changes())
+            .collect()
+    }
+
+    /// Evaluates what changed since the last evaluation: the formulas that
+    /// read a cell written since, the formulas that read those, and so on,
+    /// and the formulas that call a volatile function. The others keep the
+    /// values they have, which are what a full evaluation would give them.
+    /// Returns what changed: the cells written and the formulas whose value
+    /// changed, or that everything may have (`full`).
+    ///
+    /// It evaluates everything (`evaluate`) when it cannot be sure to give
+    /// the same values: before a first full evaluation, after rows or
+    /// columns moved or a row was hidden or shown, when a dynamic array or
+    /// a CSE array is among what changed or what reads it (where an array
+    /// spills depends on the order of evaluation), and when a circular
+    /// reference is met (which formulas end up `#CIRC!` depends on it too).
+    pub fn evaluate_changes(&mut self) -> EvaluationChanges {
+        self.evaluation.formulas_run = 0;
+        let changes = self.take_changes();
+        if !self.dependencies.ready || changes.iter().any(Changes::anything) {
+            return self.evaluate_all_changes();
+        }
+        let written: Vec<Rect> = changes
+            .iter()
+            .enumerate()
+            .flat_map(|(sheet, changes)| {
+                changes.areas().iter().map(move |area| Rect {
+                    sheet: sheet as u32,
+                    row1: area.row1,
+                    column1: area.column1,
+                    row2: area.row2,
+                    column2: area.column2,
+                })
+            })
+            .collect();
+        if written.iter().any(|area| self.touches_an_array(area)) {
+            return self.evaluate_all_changes();
+        }
+
+        // What runs again: the formulas written, and everything that reads
+        // what changed, through formulas that read formulas
+        let mut dirty: HashSet<CellKey, KeyBuild> = HashSet::default();
+        let mut queue: Vec<Rect> = Vec::new();
+        for area in &written {
+            // The formulas that were there, which may be gone
+            for formula in self.dependencies.formulas_within(area) {
+                self.dependencies.forget(formula);
+            }
+            for formula in self.formulas_in(area) {
+                dirty.insert(formula);
+            }
+            queue.push(*area);
+        }
+        for formula in self.dependencies.volatile.iter() {
+            if dirty.insert(*formula) {
+                queue.push(Rect::cell(*formula));
+            }
+        }
+        let mut readers = Vec::new();
+        while let Some(area) = queue.pop() {
+            readers.clear();
+            self.dependencies.readers_of(&area, &mut readers);
+            for reader in readers.drain(..) {
+                if dirty.insert(reader) {
+                    queue.push(Rect::cell(reader));
+                }
+            }
+        }
+        let mut order: Vec<CellKey> = dirty.into_iter().collect();
+        order.sort_unstable();
+        let mut before = Vec::with_capacity(order.len());
+        for formula in &order {
+            let reference = reference_of(*formula);
+            let cell = self.fetch_cell(reference).map(|cell| cell.into_owned());
+            match &cell {
+                Some(Cell::CellFormula { .. }) => {}
+                // An array is a full evaluation's business, and so is a
+                // formula that was on a cycle
+                Some(Cell::ArrayFormula { .. }) | Some(Cell::SpillCell { .. }) => {
+                    return self.evaluate_all_changes()
+                }
+                _ => {}
+            }
+            if self.evaluation.circular.contains(formula) {
+                return self.evaluate_all_changes();
+            }
+            before.push(cell);
+        }
+
+        for formula in &order {
+            self.evaluation.cells.remove(formula);
+            self.dependencies.forget(*formula);
+        }
+        let state = &mut self.evaluation;
+        state.stack.clear();
+        state.seen.clear();
+        state.seen_ranges.clear();
+        state.restart = None;
+        state.depth = 0;
+        state.unwinding = false;
+        state.in_pass = true;
+        state.record_reads = false;
+        let circular_before = state.circular.len();
+        self.clear_variable_stack();
+        self.clear_lambdas();
+        for formula in &order {
+            let reference = reference_of(*formula);
+            if !matches!(
+                self.fetch_cell(reference).as_deref(),
+                Some(Cell::CellFormula { .. })
+            ) {
+                continue;
+            }
+            self.evaluation.root = Some(reference);
+            self.evaluate_cell(reference);
+            if self.evaluation.restart.is_some() {
+                break;
+            }
+        }
+        self.evaluation.in_pass = false;
+        self.evaluation.root = None;
+        if self.evaluation.restart.is_some() || self.evaluation.circular.len() != circular_before {
+            return self.evaluate_all_changes();
+        }
+        for formula in &order {
+            self.dependencies.index(*formula);
+        }
+        self.evaluate_conditional_formatting();
+        self.take_changes();
+
+        let mut areas: Vec<Area> = written
+            .iter()
+            .map(|area| Area {
+                sheet: area.sheet,
+                row: area.row1,
+                column: area.column1,
+                width: area.column2 - area.column1 + 1,
+                height: area.row2 - area.row1 + 1,
+            })
+            .collect();
+        for (formula, before) in order.iter().zip(before) {
+            if written.iter().any(|area| area.contains(*formula)) {
+                continue;
+            }
+            let after = self
+                .fetch_cell(reference_of(*formula))
+                .map(|cell| cell.into_owned());
+            if after != before {
+                areas.push(Area {
+                    sheet: formula.0,
+                    row: formula.1,
+                    column: formula.2,
+                    width: 1,
+                    height: 1,
+                });
+            }
+        }
+        EvaluationChanges {
+            full: false,
+            areas,
+            formulas_run: self.evaluation.formulas_run,
+        }
+    }
+
+    /// `evaluate`, said as a change of everything.
+    fn evaluate_all_changes(&mut self) -> EvaluationChanges {
+        self.evaluate();
+        EvaluationChanges {
+            full: true,
+            areas: Vec::new(),
+            formulas_run: self.evaluation.formulas_run,
+        }
+    }
+
+    /// Whether an area holds or overlaps a dynamic array's anchor or its
+    /// area, or a cell written by any array.
+    fn touches_an_array(&self, area: &Rect) -> bool {
+        for anchor in &self.evaluation.anchor_order {
+            let (width, height) = match self.fetch_cell(*anchor).as_deref() {
+                Some(Cell::ArrayFormula { r, .. }) => *r,
+                _ => (1, 1),
+            };
+            let spill = Rect {
+                sheet: anchor.sheet,
+                row1: anchor.row,
+                column1: anchor.column,
+                row2: anchor.row + height.max(1) - 1,
+                column2: anchor.column + width.max(1) - 1,
+            };
+            if spill.intersects(area) {
+                return true;
+            }
+        }
+        // A CSE array is not among the anchors: look at the cells, as far as
+        // it is cheap to
+        if (area.row2 - area.row1 + 1) as i64 * (area.column2 - area.column1 + 1) as i64 <= 4096 {
+            let Ok(worksheet) = self.workbook.worksheet(area.sheet) else {
+                return false;
+            };
+            for row in area.row1..=area.row2 {
+                for (_, cell) in
+                    worksheet
+                        .sheet_data
+                        .cells_in_row_between(row, area.column1, area.column2)
+                {
+                    if matches!(*cell, Cell::ArrayFormula { .. } | Cell::SpillCell { .. }) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// The formula cells in an area.
+    fn formulas_in(&self, area: &Rect) -> Vec<CellKey> {
+        let Ok(worksheet) = self.workbook.worksheet(area.sheet) else {
+            return Vec::new();
+        };
+        if worksheet.shared_formulas.is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for row in area.row1..=area.row2 {
+            for (column, cell) in
+                worksheet
+                    .sheet_data
+                    .cells_in_row_between(row, area.column1, area.column2)
+            {
+                if cell.has_formula() {
+                    found.push((area.sheet, row, column));
+                }
+            }
+        }
+        found
     }
 
     /// Sets how many formulas deep the evaluation may recurse. A formula that
@@ -719,6 +974,9 @@ impl<'a> Model<'a> {
         state.unwinding = false;
         state.circular = circular_anchors.iter().copied().collect();
         state.in_pass = true;
+        // Every formula records what it reads again
+        self.dependencies.clear();
+        let state = &mut self.evaluation;
         // What a formula read is put on record to be contradicted by an
         // anchor's spill. With no dynamic anchor in the workbook nothing
         // spills and nothing can contradict a read, so none is recorded: on a
@@ -945,6 +1203,7 @@ impl<'a> Model<'a> {
             self.links.remove(&key);
         }
         self.evaluation.depth += 1;
+        self.evaluation.formulas_run += 1;
         let result = if self.evaluation.circular.contains(&key) {
             circular_reference(cell_reference)
         } else {
@@ -1163,6 +1422,22 @@ impl<'a> Model<'a> {
         });
         true
     }
+}
+
+fn reference_of((sheet, row, column): CellKey) -> CellReferenceIndex {
+    CellReferenceIndex { sheet, row, column }
+}
+
+/// What an evaluation changed: see `Model::evaluate_changes`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvaluationChanges {
+    /// Everything was evaluated: any cell may have changed.
+    pub full: bool,
+    /// When not `full`, the areas written since the evaluation before, and
+    /// each formula whose value changed.
+    pub areas: Vec<Area>,
+    /// How many formulas ran.
+    pub formulas_run: usize,
 }
 
 fn circular_reference(cell_reference: CellReferenceIndex) -> CalcResult {

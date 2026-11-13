@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
 
+use crate::dependencies::{Dependencies, Rect};
 use crate::sheet_data::{Constant, Peek};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -341,6 +342,9 @@ pub struct Model<'a> {
     pub(crate) last_lambda_id: usize,
     /// Everything the evaluation algorithm needs besides the workbook. See `evaluation.rs`.
     pub(crate) evaluation: Evaluation,
+    /// What each formula read when it last ran, and which formulas read a
+    /// cell. See `dependencies.rs`.
+    pub(crate) dependencies: Dependencies,
     /// Evaluated CF results per cell, keyed by (sheet_index, row, column).
     /// Rebuilt from scratch on every call to evaluate_conditional_formatting().
     pub(crate) cf_cache: HashMap<(u32, i32, i32), Vec<CfCellResult>>,
@@ -409,6 +413,59 @@ impl<'a> Model<'a> {
         self.lambdas.clear();
         self.last_lambda_id = 0;
     }
+
+    /// Records that the formula running now read a rectangle of a sheet
+    /// (see `dependencies.rs`). Reads outside an evaluation pass are
+    /// nobody's.
+    #[inline]
+    pub(crate) fn record_read(
+        &mut self,
+        sheet: u32,
+        row1: i32,
+        column1: i32,
+        row2: i32,
+        column2: i32,
+    ) {
+        if !self.evaluation.in_pass {
+            return;
+        }
+        if let Some(&reader) = self.evaluation.stack.last() {
+            self.dependencies.record(
+                (reader.sheet, reader.row, reader.column),
+                Rect {
+                    sheet,
+                    row1,
+                    column1,
+                    row2,
+                    column2,
+                },
+            );
+        }
+    }
+
+    /// `record_read` for a range given by its corners.
+    #[inline]
+    pub(crate) fn record_range(&mut self, left: CellReferenceIndex, right: CellReferenceIndex) {
+        self.record_read(
+            left.sheet,
+            left.row.min(right.row),
+            left.column.min(right.column),
+            left.row.max(right.row),
+            left.column.max(right.column),
+        );
+    }
+
+    /// Records that the formula running now called a volatile function: it
+    /// runs in every evaluation.
+    pub(crate) fn record_volatile(&mut self) {
+        if !self.evaluation.in_pass {
+            return;
+        }
+        if let Some(&reader) = self.evaluation.stack.last() {
+            self.dependencies
+                .record_volatile((reader.sheet, reader.row, reader.column));
+        }
+    }
     pub(crate) fn evaluate_node_with_reference(
         &mut self,
         node: &Node,
@@ -431,6 +488,7 @@ impl<'a> Model<'a> {
                 if !absolute_column {
                     column1 += cell.column;
                 }
+                self.record_read(*sheet_index, row1, column1, row1, column1);
                 CalcResult::Range {
                     left: CellReferenceIndex {
                         sheet: *sheet_index,
@@ -472,6 +530,13 @@ impl<'a> Model<'a> {
                 if !absolute_column2 {
                     column_right += cell.column;
                 }
+                self.record_read(
+                    *sheet_index,
+                    row_left.min(row_right),
+                    column_left.min(column_right),
+                    row_left.max(row_right),
+                    column_left.max(column_right),
+                );
                 // FIXME: HACK. The parser is currently parsing Sheet3!A1:A10 as Sheet3!A1:(present sheet)!A10
                 CalcResult::Range {
                     left: CellReferenceIndex {
@@ -513,12 +578,14 @@ impl<'a> Model<'a> {
                 if let Ok(Some(parsed_defined_name)) = self.get_parsed_defined_name(name, *scope) {
                     match parsed_defined_name {
                         ParsedDefinedName::CellReference(reference) => {
+                            self.record_range(reference, reference);
                             return CalcResult::Range {
                                 left: reference,
                                 right: reference,
                             };
                         }
                         ParsedDefinedName::RangeReference(range) => {
+                            self.record_range(range.left, range.right);
                             return CalcResult::Range {
                                 left: range.left,
                                 right: range.right,
@@ -578,6 +645,7 @@ impl<'a> Model<'a> {
                     && left2.row == right2.row
                     && left2.column == right2.column
                 {
+                    self.record_range(left1, right2);
                     return CalcResult::Range {
                         left: left1,
                         right: right2,
@@ -811,6 +879,7 @@ impl<'a> Model<'a> {
                 if !absolute_column {
                     column1 += cell.column;
                 }
+                self.record_read(*sheet_index, row1, column1, row1, column1);
                 self.evaluate_cell(CellReferenceIndex {
                     sheet: *sheet_index,
                     row: row1,
@@ -856,6 +925,7 @@ impl<'a> Model<'a> {
                 } else {
                     *column2 + cell.column
                 };
+                self.record_read(*sheet_index, r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2));
                 CalcResult::Range {
                     left: CellReferenceIndex {
                         sheet: *sheet_index,
@@ -883,7 +953,20 @@ impl<'a> Model<'a> {
                 }),
             },
             OpPowerKind { left, right } => self.handle_arithmetic(left, right, cell, &power),
-            FunctionKind { kind, args } => self.evaluate_function(kind, args, cell),
+            FunctionKind { kind, args } => {
+                if kind.is_volatile() {
+                    self.record_volatile();
+                }
+                let result = self.evaluate_function(kind, args, cell);
+                // A reference made by the function, as INDIRECT and OFFSET
+                // make them, is read as what it came to
+                if kind.returns_reference() {
+                    if let CalcResult::Range { left, right } = &result {
+                        self.record_range(*left, *right);
+                    }
+                }
+                result
+            }
             NamedFunctionKind { name, args, id } => {
                 let lambda_result = if let Some(var_id) = id {
                     // Bound by LET — look up the variable, which should be a Lambda.
@@ -929,12 +1012,16 @@ impl<'a> Model<'a> {
                 if let Ok(Some(parsed_defined_name)) = self.get_parsed_defined_name(name, *scope) {
                     match parsed_defined_name {
                         ParsedDefinedName::CellReference(reference) => {
+                            self.record_range(reference, reference);
                             self.evaluate_cell(reference)
                         }
-                        ParsedDefinedName::RangeReference(range) => CalcResult::Range {
-                            left: range.left,
-                            right: range.right,
-                        },
+                        ParsedDefinedName::RangeReference(range) => {
+                            self.record_range(range.left, range.right);
+                            CalcResult::Range {
+                                left: range.left,
+                                right: range.right,
+                            }
+                        }
                         ParsedDefinedName::LambdaDefinition(param_names, body) => {
                             let lambda_id = self.get_next_lambda_id();
                             self.lambdas.insert(lambda_id, (param_names, body));
@@ -1021,14 +1108,15 @@ impl<'a> Model<'a> {
                         }
                     };
                     match worksheet.get_cell_spill(row, column) {
-                        Ok((width, height)) => CalcResult::Range {
-                            left: CellReferenceIndex { sheet, row, column },
-                            right: CellReferenceIndex {
+                        Ok((width, height)) => {
+                            let right = CellReferenceIndex {
                                 sheet,
                                 row: row + height - 1,
                                 column: column + width - 1,
-                            },
-                        },
+                            };
+                            self.record_range(left, right);
+                            CalcResult::Range { left, right }
+                        }
                         Err(e) => CalcResult::new_error(
                             Error::REF,
                             cell,
@@ -1397,6 +1485,8 @@ impl<'a> Model<'a> {
         if row + height - 1 > LAST_ROW || column + width - 1 > LAST_COLUMN {
             return Ok(spill_error("Spill would exceed worksheet bounds"));
         }
+        // Whether it spills depends on every cell of the area it would take
+        self.record_read(sheet, row, column, row + height - 1, column + width - 1);
 
         // Is the area free? Another array's spill cell blocks, whichever anchor
         // came first in the sheet: the spill that exists keeps its cells, as in
@@ -2170,6 +2260,7 @@ impl<'a> Model<'a> {
             lambdas: HashMap::new(),
             last_lambda_id: 0,
             evaluation: Evaluation::default(),
+            dependencies: Dependencies::default(),
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };
@@ -3750,8 +3841,8 @@ impl<'a> Model<'a> {
     }
 
     /// What the workbook takes in memory, in bytes, as far as the model can
-    /// tell from what it holds: the cells of each sheet and the texts they
-    /// share. An estimate from the sizes of its parts; the parsed formulas,
+    /// tell from what it holds: the cells of each sheet, the texts they
+    /// share and the record of what each formula read. An estimate from the sizes of its parts; the parsed formulas,
     /// the styles and what the allocator adds are left out. It costs a look
     /// at every row, not at every cell.
     pub fn memory_usage(&self) -> MemoryUsage {
@@ -3764,6 +3855,7 @@ impl<'a> Model<'a> {
                 .map(String::capacity)
                 .sum::<usize>();
         MemoryUsage {
+            dependencies: self.dependencies.heap_size(),
             sheets: self
                 .workbook
                 .worksheets
@@ -4395,12 +4487,15 @@ pub struct MemoryUsage {
     pub sheets: Vec<usize>,
     /// The texts the cells show, held once for the workbook.
     pub shared_strings: usize,
+    /// The record of what each formula read, which lets an edit evaluate
+    /// only what it affects (`Model::evaluate_changes`).
+    pub dependencies: usize,
 }
 
 impl MemoryUsage {
     /// Everything counted.
     pub fn total(&self) -> usize {
-        self.sheets.iter().sum::<usize>() + self.shared_strings
+        self.sheets.iter().sum::<usize>() + self.shared_strings + self.dependencies
     }
 }
 
