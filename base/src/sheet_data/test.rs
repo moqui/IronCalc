@@ -757,3 +757,34 @@ fn a_row_of_constants_stays_one_only_while_it_can() {
     assert_eq!(data.columns_in_row(6), vec![2, 6]);
     assert_eq!(data.cell(6, 6).as_deref(), Some(&number(2.0)));
 }
+
+#[test]
+fn the_memory_of_a_sheet_grows_with_its_cells() {
+    let mut data = SheetData::new();
+    assert_eq!(data.heap_size(), 0);
+    data.set_row(1, (1..=100).map(|column| (column, number(1.0))));
+    let numbers = data.heap_size();
+    // a row of numbers is its numbers, and a chunk of row slots
+    assert!(numbers >= 100 * 8, "{numbers}");
+    data.set_row(2, (1..=100).map(|column| (column, text(column))));
+    let constants = data.heap_size() - numbers;
+    assert!((100 * 16..100 * 20).contains(&constants), "{constants}");
+    data.set_row(
+        3,
+        (1..=100).map(|column| {
+            (
+                column,
+                Cell::CellFormula {
+                    f: 0,
+                    s: 0,
+                    v: crate::types::FormulaValue::Text("x".repeat(10)),
+                },
+            )
+        }),
+    );
+    let formulas = data.heap_size() - numbers - constants;
+    // the cells, and the text each holds
+    assert!(formulas >= 100 * (56 + 10), "{formulas}");
+    data.remove_row(3);
+    assert_eq!(data.heap_size(), numbers + constants);
+}

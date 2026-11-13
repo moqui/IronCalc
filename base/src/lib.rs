@@ -78,6 +78,7 @@ pub use merged_cells::MergeStructure;
 pub use model::get_milliseconds_since_epoch;
 pub use model::DefinedNameEntry;
 pub use model::FmtSettings;
+pub use model::MemoryUsage;
 pub use model::Model;
 pub use user_model::BorderArea;
 pub use user_model::CellText;

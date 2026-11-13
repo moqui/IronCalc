@@ -3749,6 +3749,31 @@ impl<'a> Model<'a> {
         style
     }
 
+    /// What the workbook takes in memory, in bytes, as far as the model can
+    /// tell from what it holds: the cells of each sheet and the texts they
+    /// share. An estimate from the sizes of its parts; the parsed formulas,
+    /// the styles and what the allocator adds are left out. It costs a look
+    /// at every row, not at every cell.
+    pub fn memory_usage(&self) -> MemoryUsage {
+        let shared_strings = self.workbook.shared_strings.capacity()
+            * std::mem::size_of::<String>()
+            + self
+                .workbook
+                .shared_strings
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>();
+        MemoryUsage {
+            sheets: self
+                .workbook
+                .worksheets
+                .iter()
+                .map(|worksheet| worksheet.sheet_data.heap_size())
+                .collect(),
+            shared_strings,
+        }
+    }
+
     /// Returns an internal binary representation of the workbook
     ///
     /// See also:
@@ -4360,6 +4385,22 @@ impl<'a> Model<'a> {
             self.locale,
             self.language,
         )
+    }
+}
+
+/// What a workbook takes in memory, in bytes: see `Model::memory_usage`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryUsage {
+    /// The cells of each sheet, in the order of the sheets.
+    pub sheets: Vec<usize>,
+    /// The texts the cells show, held once for the workbook.
+    pub shared_strings: usize,
+}
+
+impl MemoryUsage {
+    /// Everything counted.
+    pub fn total(&self) -> usize {
+        self.sheets.iter().sum::<usize>() + self.shared_strings
     }
 }
 

@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use crate::constants::LAST_COLUMN;
 use crate::expressions::token::Error;
-use crate::types::Cell;
+use crate::types::{Cell, ErrorDetails, FormulaValue, SpillValue};
 
 /// Rows this short are searched from the left; longer ones by bisection.
 const LINEAR_SEARCH_LIMIT: usize = 8;
@@ -657,6 +657,49 @@ impl Row {
                     *self = Row::from_cells(cells);
                 }
             }
+        }
+    }
+}
+
+/// The memory a cell holds beyond its own size: the text of a formula's
+/// result, the origin and the message of its error.
+fn cell_heap_size(cell: &Cell) -> usize {
+    match cell {
+        Cell::CellFormula { v, .. } | Cell::ArrayFormula { v, .. } => match v {
+            FormulaValue::Text(text) => text.capacity(),
+            FormulaValue::Error { d, .. } => {
+                std::mem::size_of::<ErrorDetails>() + d.o.capacity() + d.m.capacity()
+            }
+            FormulaValue::Unevaluated | FormulaValue::Boolean(_) | FormulaValue::Number(_) => 0,
+        },
+        Cell::SpillCell {
+            v: SpillValue::Text(text),
+            ..
+        } => text.capacity(),
+        _ => 0,
+    }
+}
+
+impl Row {
+    /// The memory the row holds beyond its own size, in bytes.
+    pub(super) fn heap_size(&self) -> usize {
+        match self {
+            Row::Cells(cells) => {
+                cells.capacity() * std::mem::size_of::<(i32, Cell)>()
+                    + cells
+                        .iter()
+                        .map(|(_, cell)| cell_heap_size(cell))
+                        .sum::<usize>()
+            }
+            Row::Numbers {
+                values,
+                other_styles,
+                ..
+            } => {
+                values.capacity() * std::mem::size_of::<f64>()
+                    + std::mem::size_of_val::<[(u32, i32)]>(other_styles)
+            }
+            Row::Constants { cells, .. } => cells.capacity() * std::mem::size_of::<Constant>(),
         }
     }
 }

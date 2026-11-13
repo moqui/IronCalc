@@ -295,9 +295,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "built {rows} rows of 20 and of 13 columns in {:?}",
         start.elapsed()
     );
+    let usage = model.memory_usage();
     println!(
-        "in memory {:.1} MB, as bytes {:.1} MB",
+        "in memory {:.1} MB ({:.1} MB by memory_usage), as bytes {:.1} MB",
         megabytes(LIVE.load(Ordering::Relaxed) - empty),
+        megabytes(usage.total() as u64),
         megabytes(model.to_bytes().len() as u64)
     );
     if std::env::var("RELOAD").is_ok() {

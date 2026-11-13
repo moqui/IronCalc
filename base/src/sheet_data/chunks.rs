@@ -285,6 +285,31 @@ impl SheetData {
         }
     }
 
+    /// The memory the cells of the sheet take, in bytes: the rows and what
+    /// they hold, but not the texts they show, which are the workbook's
+    /// shared strings. Found from the sizes of the rows, not cell by cell
+    /// except in rows of cells that may hold text of their own. What the
+    /// allocator adds to each allocation is left out.
+    pub fn heap_size(&self) -> usize {
+        let chunks = self.chunks.capacity() * std::mem::size_of::<Option<Box<Chunk>>>();
+        let rows: usize = self
+            .chunks
+            .iter()
+            .flatten()
+            .map(|chunk| {
+                std::mem::size_of::<Chunk>()
+                    + chunk.rows.capacity() * std::mem::size_of::<Option<Row>>()
+                    + chunk
+                        .rows
+                        .iter()
+                        .flatten()
+                        .map(Row::heap_size)
+                        .sum::<usize>()
+            })
+            .sum();
+        chunks + rows
+    }
+
     /// What is at a position, for a quick look: the constant itself if the
     /// row holds the position as one, the cell borrowed if it holds it as a
     /// cell. Unlike `cell` it never makes a cell to hand out.

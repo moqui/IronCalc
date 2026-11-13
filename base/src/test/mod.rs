@@ -66,6 +66,7 @@ mod test_merged_cells;
 mod test_metadata;
 mod test_model_cell_clear_all;
 mod test_model_is_empty_cell;
+mod test_model_memory;
 mod test_move_formula;
 mod test_mround_trunc_int;
 mod test_nan_inf;
