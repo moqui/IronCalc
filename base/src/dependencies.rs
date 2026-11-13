@@ -141,6 +141,11 @@ impl Dependencies {
         }
     }
 
+    /// How many formulas are recorded.
+    pub(crate) fn formula_count(&self) -> usize {
+        self.reads.len().max(self.volatile.len())
+    }
+
     /// Indexes every formula recorded, after a full evaluation.
     pub(crate) fn index_all(&mut self) {
         let formulas: Vec<CellKey> = self.reads.keys().copied().collect();

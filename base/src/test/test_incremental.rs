@@ -44,7 +44,7 @@ fn the_first_evaluation_is_full_and_an_edit_nothing_reads_runs_nothing() {
 fn a_chain_runs_from_the_edit_down_and_reports_what_changed() {
     let mut model = new_empty_model();
     model._set("A1", "1");
-    for row in 2..=10 {
+    for row in 2..=20 {
         model._set(&format!("A{row}"), &format!("=A{}+1", row - 1));
     }
     model._set("B1", "=5");
@@ -52,17 +52,40 @@ fn a_chain_runs_from_the_edit_down_and_reports_what_changed() {
 
     let changes = edit(&mut model, "A1", "100");
     assert!(!changes.full);
-    assert_eq!(changes.formulas_run, 9);
-    assert_eq!(model._get_text("A10"), *"109");
-    let mut expected = vec![cell(0, 1, 1)];
-    expected.extend((2..=10).map(|row| cell(0, row, 1)));
-    assert_eq!(changes.areas, expected);
-
-    // From the middle
-    let changes = edit(&mut model, "A5", "0");
+    assert_eq!(changes.formulas_run, 19);
+    assert_eq!(model._get_text("A20"), *"119");
+    let changes = edit(&mut model, "A15", "0");
+    assert!(!changes.full);
     assert_eq!(changes.formulas_run, 5);
-    assert_eq!(model._get_text("A10"), *"5");
-    assert_eq!(model._get_text("A4"), *"103");
+    assert_eq!(model._get_text("A20"), *"5");
+    assert_eq!(model._get_text("A14"), *"113");
+    let changes = edit(&mut model, "A18", "100");
+    assert_eq!(changes.formulas_run, 2);
+    assert_eq!(model._get_text("A20"), *"102");
+    let mut expected = vec![cell(0, 18, 1)];
+    expected.extend((19..=20).map(|row| cell(0, row, 1)));
+    assert_eq!(changes.areas, expected);
+}
+
+#[test]
+fn when_most_of_many_formulas_run_all_of_them_do_at_once() {
+    let mut model = new_empty_model();
+    model._set("A1", "1");
+    for row in 2..=3000 {
+        model._set(&format!("A{row}"), &format!("=A{}+1", row - 1));
+    }
+    model.evaluate();
+    // 2,999 of 2,999: a full evaluation
+    let changes = edit(&mut model, "A1", "2");
+    assert!(changes.full);
+    assert_eq!(model._get_text("A3000"), *"3001");
+    // 1,500 of 2,999: just over half, but the half below runs alone
+    let changes = edit(&mut model, "A1500", "0");
+    assert!(changes.full);
+    let changes = edit(&mut model, "A2000", "0");
+    assert!(!changes.full);
+    assert_eq!(changes.formulas_run, 1000);
+    assert_eq!(model._get_text("A3000"), *"1000");
 }
 
 #[test]

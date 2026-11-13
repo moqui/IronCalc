@@ -507,6 +507,10 @@ impl Evaluation {
     }
 }
 
+/// Below this many formulas to run again, `evaluate_changes` runs them,
+/// however many there are in all: either way is quick.
+const FEW_FORMULAS: usize = 1024;
+
 /// What `Model::survey` finds
 #[derive(Default)]
 struct Survey {
@@ -585,7 +589,9 @@ impl<'a> Model<'a> {
     /// columns moved or a row was hidden or shown, when a dynamic array or
     /// a CSE array is among what changed or what reads it (where an array
     /// spills depends on the order of evaluation), and when a circular
-    /// reference is met (which formulas end up `#CIRC!` depends on it too).
+    /// reference is met (which formulas end up `#CIRC!` depends on it too);
+    /// and when more than half of the formulas would run (and more than
+    /// `FEW_FORMULAS`), since a full evaluation then costs less.
     pub fn evaluate_changes(&mut self) -> EvaluationChanges {
         self.evaluation.formulas_run = 0;
         let changes = self.take_changes();
@@ -637,6 +643,11 @@ impl<'a> Model<'a> {
                     queue.push(Rect::cell(reader));
                 }
             }
+        }
+        // When most formulas run again, running them all is cheaper: a full
+        // pass keeps no account of what it runs
+        if dirty.len() > FEW_FORMULAS && dirty.len() * 2 > self.dependencies.formula_count() {
+            return self.evaluate_all_changes();
         }
         let mut order: Vec<CellKey> = dirty.into_iter().collect();
         order.sort_unstable();
