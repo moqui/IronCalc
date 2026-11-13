@@ -68,6 +68,14 @@ pub(crate) fn values_are_equal(left: &CalcResult, right: &CalcResult) -> bool {
 pub(crate) fn compare_values(left: &CalcResult, right: &CalcResult) -> i32 {
     match (left, right) {
         (CalcResult::Number(value1), CalcResult::Number(value2)) => {
+            // Numbers this far apart stay apart, and in the same order, when
+            // rounded to 15 digits: rounding moves each by less than half of
+            // `scale * 1e-14`. Only the close ones need the rounding, which
+            // goes through text.
+            let scale = value1.abs().max(value2.abs());
+            if (value1 - value2).abs() > scale * 1e-14 + f64::EPSILON {
+                return if value1 < value2 { -1 } else { 1 };
+            }
             let value1 = to_excel_precision(*value1, 15);
             let value2 = to_excel_precision(*value2, 15);
             if (value2 - value1).abs() < f64::EPSILON {
