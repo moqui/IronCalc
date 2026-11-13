@@ -42,4 +42,4 @@ mod saved;
 #[cfg(test)]
 mod test;
 
-pub use chunks::SheetData;
+pub use chunks::{SheetData, UsedArea};

@@ -491,3 +491,148 @@ fn displace_columns_shifts_every_row() {
     assert_eq!(data.columns_in_row(4), vec![2, LAST_COLUMN]);
     assert_eq!(data.cell(4, LAST_COLUMN).as_deref(), Some(&number(7.0)));
 }
+
+/// The used area as a walk over every cell finds it.
+fn walked(data: &SheetData) -> Option<UsedArea> {
+    let mut area: Option<UsedArea> = None;
+    for (row, column, _) in data.cells() {
+        let found = area.get_or_insert(UsedArea {
+            min_row: row,
+            max_row: row,
+            min_column: column,
+            max_column: column,
+        });
+        found.min_row = found.min_row.min(row);
+        found.max_row = found.max_row.max(row);
+        found.min_column = found.min_column.min(column);
+        found.max_column = found.max_column.max(column);
+    }
+    area
+}
+
+#[test]
+fn the_used_area_follows_the_cells() {
+    let mut data = SheetData::new();
+    assert_eq!(data.used_area(), None);
+    // asked for after every step, so that it is kept and has to follow
+    let check = |data: &SheetData| {
+        assert_eq!(data.used_area(), walked(data));
+        data.used_area()
+    };
+    data.set_cell(5, 3, number(1.0));
+    assert_eq!(
+        check(&data),
+        Some(UsedArea {
+            min_row: 5,
+            max_row: 5,
+            min_column: 3,
+            max_column: 3,
+        })
+    );
+    // stretched by cells put on it, on every side
+    data.set_cell(2000, 7, number(1.0));
+    data.set_cell(2, 4, number(1.0));
+    data.set_cell(9, 1, number(1.0));
+    check(&data);
+    // a cell replaced or changed in place leaves it as it is
+    data.set_cell(9, 1, number(2.0));
+    *data.cell_mut(2, 4).unwrap() = number(3.0);
+    check(&data);
+    // a row of numbers and a row of cells, set whole
+    data.set_row(12, (10..=14).map(|column| (column, number(1.0))));
+    data.set_row(
+        13,
+        vec![(2, Cell::BooleanCell { v: true, s: 0 }), (30, number(1.0))],
+    );
+    assert_eq!(check(&data).map(|area| area.max_column), Some(30));
+    // a row with no cells is not part of it
+    data.set_row(5000, Vec::new());
+    assert_eq!(check(&data).map(|area| area.max_row), Some(2000));
+    // it shrinks when the cells at its edge go
+    data.remove_cell(13, 30);
+    assert_eq!(check(&data).map(|area| area.max_column), Some(14));
+    data.remove_row(2000);
+    assert_eq!(check(&data).map(|area| area.max_row), Some(13));
+    data.set_row(13, Vec::new());
+    assert_eq!(check(&data).map(|area| area.max_row), Some(12));
+    // and moves with the rows and the columns
+    data.displace_rows(3, 10);
+    check(&data);
+    data.displace_columns(2, 5);
+    check(&data);
+    data.displace_rows(13, -10);
+    check(&data);
+    data.displace_columns(7, -5);
+    check(&data);
+    // a copy has its own
+    let mut copy = data.clone();
+    copy.set_cell(1, 100, number(1.0));
+    assert_eq!(check(&copy).map(|area| area.max_column), Some(100));
+    assert_eq!(check(&data).map(|area| area.max_column), Some(14));
+    for row in data.rows() {
+        data.remove_row(row);
+    }
+    assert_eq!(check(&data), None);
+    data.set_cell(1, 1, number(1.0));
+    assert!(check(&data).is_some());
+}
+
+#[test]
+fn the_used_area_is_not_saved() {
+    let mut data = SheetData::new();
+    data.set_cell(3, 2, number(1.0));
+    let before = bitcode::encode(&data);
+    assert!(data.used_area().is_some());
+    assert_eq!(bitcode::encode(&data), before);
+    let read: SheetData = bitcode::decode(&before).unwrap();
+    assert_eq!(read.used_area(), data.used_area());
+}
+
+#[test]
+fn a_cell_is_found_with_gaps_before_it_or_without() {
+    let mut data = SheetData::new();
+    // no gap, the cell of a column is at its place; longer than the linear
+    // search limit
+    data.set_row(
+        1,
+        (1..=20).map(|column| {
+            (
+                column,
+                Cell::BooleanCell {
+                    v: column % 2 == 0,
+                    s: column,
+                },
+            )
+        }),
+    );
+    // gaps: every cell is before the place of its column would be
+    data.set_row(
+        2,
+        (1..=20).map(|column| (column * 3, Cell::BooleanCell { v: true, s: column })),
+    );
+    // starts late
+    data.set_row(
+        3,
+        (5..=9).map(|column| (column, Cell::BooleanCell { v: true, s: column })),
+    );
+    for column in 1..=20 {
+        assert_eq!(
+            data.cell(1, column).map(|cell| cell.get_style()),
+            Some(column)
+        );
+    }
+    assert_eq!(data.cell(1, 21), None);
+    assert_eq!(data.cell(1, 0), None);
+    assert_eq!(data.cell(1, -3), None);
+    for column in 1..=61 {
+        let expected = (column % 3 == 0).then_some(column / 3);
+        assert_eq!(data.cell(2, column).map(|cell| cell.get_style()), expected);
+    }
+    for column in 1..=12 {
+        let expected = (5..=9).contains(&column).then_some(column);
+        assert_eq!(data.cell(3, column).map(|cell| cell.get_style()), expected);
+    }
+    // a cell put in a gap goes where the order says
+    data.set_cell(2, 4, number(1.0));
+    assert_eq!(data.columns_in_row(2)[..3], [3, 4, 6]);
+}

@@ -679,55 +679,24 @@ impl Worksheet {
         Ok(constants::DEFAULT_ROW_HEIGHT)
     }
 
-    /// Calculates dimension of the sheet. This function isn't cheap to calculate.
+    /// The dimension of the sheet: the smallest rectangle that holds every
+    /// cell, A1 alone if there is none. The sheet keeps it (see
+    /// `SheetData::used_area`), so asking is cheap.
     pub fn dimension(&self) -> WorksheetDimension {
-        // FIXME: It's probably better to just track the size as operations happen.
-        if self.sheet_data.is_empty() {
-            return WorksheetDimension {
+        match self.sheet_data.used_area() {
+            Some(area) => WorksheetDimension {
+                min_row: area.min_row,
+                max_row: area.max_row,
+                min_column: area.min_column,
+                max_column: area.max_column,
+            },
+            None => WorksheetDimension {
                 min_row: 1,
                 max_row: 1,
                 min_column: 1,
                 max_column: 1,
-            };
+            },
         }
-
-        let mut row_range: Option<(i32, i32)> = None;
-        let mut column_range: Option<(i32, i32)> = None;
-
-        for (row_index, column_index, _) in self.sheet_data.cells() {
-            row_range = if let Some((current_min, current_max)) = row_range {
-                Some((current_min.min(row_index), current_max.max(row_index)))
-            } else {
-                Some((row_index, row_index))
-            };
-            column_range = if let Some((current_min, current_max)) = column_range {
-                Some((current_min.min(column_index), current_max.max(column_index)))
-            } else {
-                Some((column_index, column_index))
-            };
-        }
-
-        let dimension = if let Some((min_row, max_row)) = row_range {
-            if let Some((min_column, max_column)) = column_range {
-                Some(WorksheetDimension {
-                    min_row,
-                    min_column,
-                    max_row,
-                    max_column,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        dimension.unwrap_or(WorksheetDimension {
-            min_row: 1,
-            max_row: 1,
-            min_column: 1,
-            max_column: 1,
-        })
     }
 
     /// Returns true if cell is completely empty.

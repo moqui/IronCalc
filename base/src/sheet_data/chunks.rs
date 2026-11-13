@@ -2,6 +2,7 @@
 //! they are needed.
 
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use bitcode::{Decode, Encode};
 
@@ -29,6 +30,28 @@ pub struct SheetData {
     chunks: Vec<Option<Box<Chunk>>>,
     /// How many rows exist.
     row_count: usize,
+    /// The used area, once someone has asked for it: see `used_area`. Not
+    /// saved; it is found again from the rows.
+    #[bitcode(skip)]
+    used_area: OnceLock<Option<UsedArea>>,
+}
+
+/// The smallest rectangle that holds every cell of a sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsedArea {
+    pub min_row: i32,
+    pub max_row: i32,
+    pub min_column: i32,
+    pub max_column: i32,
+}
+
+impl UsedArea {
+    fn include(&mut self, row: i32, first_column: i32, last_column: i32) {
+        self.min_row = self.min_row.min(row);
+        self.max_row = self.max_row.max(row);
+        self.min_column = self.min_column.min(first_column);
+        self.max_column = self.max_column.max(last_column);
+    }
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -68,10 +91,58 @@ impl SheetData {
         self.chunks.get(chunk)?.as_ref()?.rows[index].as_ref()
     }
 
+    /// The row, to be changed. Whoever adds a cell to it or takes one away
+    /// says so to the used area: `grow_used_area`, `forget_used_area`.
     #[inline]
     fn row_mut(&mut self, row: i32) -> Option<&mut Row> {
         let (chunk, index) = locate(row)?;
         self.chunks.get_mut(chunk)?.as_mut()?.rows[index].as_mut()
+    }
+
+    /// The smallest rectangle that holds every cell of the sheet, `None` if
+    /// it has no cells. A row without cells is not part of it.
+    ///
+    /// It is found from the first and the last cell of every row, with no
+    /// walk over the cells, and kept: a cell put on the sheet stretches it,
+    /// and it is only found again after cells were removed. Functions ask
+    /// for it on every evaluation, to walk a whole column or a whole row no
+    /// further than the sheet goes.
+    pub fn used_area(&self) -> Option<UsedArea> {
+        *self.used_area.get_or_init(|| {
+            let mut area: Option<UsedArea> = None;
+            for (row, row_data) in self.rows_in_order() {
+                let Some((first_column, last_column)) = row_data.columns() else {
+                    continue;
+                };
+                match &mut area {
+                    Some(area) => area.include(row, first_column, last_column),
+                    None => {
+                        area = Some(UsedArea {
+                            min_row: row,
+                            max_row: row,
+                            min_column: first_column,
+                            max_column: last_column,
+                        })
+                    }
+                }
+            }
+            area
+        })
+    }
+
+    /// A cell was put at a position: the used area, if it is known, holds it.
+    fn grow_used_area(&mut self, row: i32, column: i32) {
+        match self.used_area.get_mut() {
+            Some(Some(area)) => area.include(row, column, column),
+            // No cells before this one
+            Some(None) => self.forget_used_area(),
+            None => {}
+        }
+    }
+
+    /// Cells were removed or moved: the used area has to be found again.
+    fn forget_used_area(&mut self) {
+        self.used_area = OnceLock::new();
     }
 
     /// The row, created if it does not exist. `None` outside the sheet.
@@ -120,7 +191,11 @@ impl SheetData {
 
     /// Puts a cell at a position and returns the one that was there.
     pub fn set_cell(&mut self, row: i32, column: i32, cell: Cell) -> Option<Cell> {
-        self.row_or_insert(row)?.insert(column, cell)
+        let old = self.row_or_insert(row)?.insert(column, cell);
+        if old.is_none() {
+            self.grow_used_area(row, column);
+        }
+        old
     }
 
     /// Removes the cell at a position and returns it.
@@ -130,6 +205,7 @@ impl SheetData {
         if row_data.is_empty() {
             self.remove_row(row);
         }
+        self.forget_used_area();
         Some(cell)
     }
 
@@ -219,6 +295,7 @@ impl SheetData {
         let (chunk_index, index) = locate(row)?;
         let chunk = self.chunks.get_mut(chunk_index)?.as_mut()?;
         let taken = chunk.rows[index].take()?;
+        self.used_area = OnceLock::new();
         chunk.used -= 1;
         self.row_count -= 1;
         if chunk.used == 0 {
@@ -233,6 +310,7 @@ impl SheetData {
         if let Some(slot) = self.row_or_insert(row) {
             *slot = data;
         }
+        self.forget_used_area();
     }
 
     /// Moves every row from `first_row` on by `delta` rows: row `r` becomes
@@ -279,6 +357,7 @@ impl SheetData {
         if delta == 0 {
             return;
         }
+        self.forget_used_area();
         let mut emptied = Vec::new();
         for (chunk_index, chunk) in self.chunks.iter_mut().enumerate() {
             let Some(chunk) = chunk else {
@@ -327,6 +406,7 @@ impl SheetData {
         }
         cells.shrink_to_fit();
         *row_data = Row::from_cells(cells);
+        self.forget_used_area();
     }
 }
 
