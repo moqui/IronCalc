@@ -1764,60 +1764,166 @@ impl<'a> Model<'a> {
         last_column: i32,
         push: &mut impl FnMut(ArrayNode),
     ) {
+        self.walk_row(sheet, row, first_column, last_column, &mut |value| {
+            push(value.to_array_node());
+            true
+        });
+    }
+
+    /// Hands every number of a range to `f`, row by row, and stops at the
+    /// first error, which it returns. Texts, booleans and empty cells are
+    /// passed over. A whole column or row is walked only as far as the sheet
+    /// goes (`clip_to_used_area`). This is what SUM, MIN, MAX, AVERAGE, the
+    /// deviations and most other functions over a range of numbers do with
+    /// it.
+    pub(crate) fn for_each_number_in_range(
+        &mut self,
+        left: CellReferenceIndex,
+        right: CellReferenceIndex,
+        cell: CellReferenceIndex,
+        mut f: impl FnMut(f64),
+    ) -> Result<(), CalcResult> {
+        if left.sheet != right.sheet {
+            return Err(CalcResult::new_error(
+                Error::VALUE,
+                cell,
+                "Ranges are in different sheets".to_string(),
+            ));
+        }
+        let (last_row, last_column) = self
+            .clip_to_used_area(left.sheet, left.row, left.column, right.row, right.column)
+            .map_err(|message| CalcResult::new_error(Error::ERROR, cell, message))?;
+        let mut error = None;
+        for row in left.row..=last_row {
+            let walked = self.walk_row(left.sheet, row, left.column, last_column, &mut |value| {
+                match value {
+                    RangeValue::Number(v) => f(v),
+                    RangeValue::Error(e) => {
+                        error = Some(e);
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            });
+            if !walked {
+                break;
+            }
+        }
+        match error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Evaluates the cells of a row from `first_column` to `last_column`, in
+    /// order, and hands the value of each to `visit`, which says whether to
+    /// go on. Returns false if it was told to stop.
+    ///
+    /// A row the sheet holds as numbers is handed over as its numbers, and
+    /// the constants of any other row are read straight from it, a text
+    /// lent and not copied; only formulas, the cells they write and errors
+    /// go through `evaluate_cell`. Every function that reads a range cell by
+    /// cell gets the same values, in the same order, as `evaluate_cell` would
+    /// give it, and the same cells are evaluated and put on record: nothing
+    /// beyond the cell where `visit` stops.
+    pub(crate) fn walk_row(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        first_column: i32,
+        last_column: i32,
+        visit: &mut impl FnMut(RangeValue<'_>) -> bool,
+    ) -> bool {
+        if self.evaluation.restart.is_none() && !self.evaluation.unwinding {
+            let sheet_data = &self.workbook.worksheets[sheet as usize].sheet_data;
+            if first_column == last_column {
+                // A column of a range: one cell of the row, found in one go
+                let cell = sheet_data.cell(row, first_column);
+                let value = match cell.as_deref() {
+                    Some(Cell::NumberCell { v, .. }) => Some(RangeValue::Number(*v)),
+                    Some(Cell::BooleanCell { v, .. }) => Some(RangeValue::Boolean(*v)),
+                    Some(Cell::SharedString { si, .. }) => self
+                        .workbook
+                        .shared_strings
+                        .get(*si as usize)
+                        .map(|s| RangeValue::Text(s.as_str())),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    return visit(value);
+                }
+            } else if let Some(numbers) =
+                sheet_data.numbers_in_row_between(row, first_column, last_column)
+            {
+                return numbers.iter().all(|v| visit(RangeValue::Number(*v)));
+            }
+        }
         let mut column = first_column;
         while column <= last_column {
             // Constants are read straight from the sheet; what is left,
             // formulas and the cells they write, is evaluated cell by cell.
-            let (stop, resume) = self.read_constants(sheet, row, column, last_column, push);
+            let Some((stop, resume)) = self.walk_constants(sheet, row, column, last_column, visit)
+            else {
+                return false;
+            };
             for c in stop..resume {
                 let cell_reference = CellReferenceIndex {
                     sheet,
                     row,
                     column: c,
                 };
-                let value = match self.evaluate_cell(cell_reference) {
-                    CalcResult::Number(n) => ArrayNode::Number(n),
-                    CalcResult::Boolean(b) => ArrayNode::Boolean(b),
-                    CalcResult::String(s) => ArrayNode::String(s),
-                    CalcResult::Error { error, .. } => ArrayNode::Error(error),
-                    CalcResult::EmptyCell | CalcResult::EmptyArg => ArrayNode::Empty,
+                let going_on = match self.evaluate_cell(cell_reference) {
+                    CalcResult::Number(n) => visit(RangeValue::Number(n)),
+                    CalcResult::Boolean(b) => visit(RangeValue::Boolean(b)),
+                    CalcResult::String(s) => visit(RangeValue::Text(&s)),
+                    error @ CalcResult::Error { .. } => visit(RangeValue::Error(error)),
+                    CalcResult::EmptyCell | CalcResult::EmptyArg => visit(RangeValue::Empty),
                     CalcResult::Range { .. } | CalcResult::Array(_) | CalcResult::Lambda(_) => {
                         // This should never happen, but we need to handle it anyway
                         debug_assert!(false, "Unexpected array result in non-array formula");
-                        ArrayNode::Error(Error::NIMPL)
+                        visit(RangeValue::Error(CalcResult::new_error(
+                            Error::NIMPL,
+                            cell_reference,
+                            "Unexpected array".to_string(),
+                        )))
                     }
                 };
-                push(value);
+                if !going_on {
+                    return false;
+                }
             }
             column = resume;
         }
+        true
     }
 
     /// Reads the cells of a row from `column` on, up to `last_column`, for as
     /// long as they are constants or hold nothing, and hands their values to
-    /// `push`: exactly what `evaluate_cell` would give for each of them,
+    /// `visit`: exactly what `evaluate_cell` would give for each of them,
     /// with the row found once instead of once per cell. A range of data is
     /// read whole this way.
     ///
-    /// It stops at the first formula or spill cell, which only `evaluate_cell`
-    /// can read, and returns `(stop, resume)`: the cells from `stop` up to
-    /// `resume`, not included, are left to the caller, and reading goes on
-    /// from `resume`. Both are past `last_column` once the row is read. Cells
-    /// are read in order and nothing is read beyond the first formula:
-    /// running it can change what the cells after it hold.
-    fn read_constants(
+    /// It stops at the first formula, spill cell or error, which only
+    /// `evaluate_cell` can read, and returns `(stop, resume)`: the cells from
+    /// `stop` up to `resume`, not included, are left to the caller, and
+    /// reading goes on from `resume`. Both are past `last_column` once the
+    /// row is read. Cells are read in order and nothing is read beyond the
+    /// first formula: running it can change what the cells after it hold.
+    /// `None` if `visit` said to stop.
+    fn walk_constants(
         &mut self,
         sheet: u32,
         row: i32,
         column: i32,
         last_column: i32,
-        push: &mut impl FnMut(ArrayNode),
-    ) -> (i32, i32) {
+        visit: &mut impl FnMut(RangeValue<'_>) -> bool,
+    ) -> Option<(i32, i32)> {
         let evaluation = &mut self.evaluation;
         if evaluation.restart.is_some() || evaluation.unwinding {
             // Nothing read now counts, and nothing is put on record: leave
             // the rest of the row to `evaluate_cell`, which knows.
-            return (column, last_column + 1);
+            return Some((column, last_column + 1));
         }
         let shared_strings = &self.workbook.shared_strings;
         let mut cells = self.workbook.worksheets[sheet as usize]
@@ -1825,51 +1931,60 @@ impl<'a> Model<'a> {
             .cells_in_row_between(row, column, last_column);
         let mut next = column;
         // A position without a cell holds nothing, like an empty cell.
-        let mut read_empty = |from: i32, to: i32, push: &mut dyn FnMut(ArrayNode)| {
-            for column in from..to {
+        let mut read_empty = |from: i32, to: i32, visit: &mut dyn FnMut(RangeValue<'_>) -> bool| {
+            (from..to).all(|column| {
                 evaluation.record_seen(CellReferenceIndex { sheet, row, column }, Seen::Empty);
-                push(ArrayNode::Empty);
-            }
+                visit(RangeValue::Empty)
+            })
         };
         while let Some((c, cell)) = cells.next() {
             let value = match &*cell {
                 Cell::EmptyCell { .. } => {
-                    read_empty(next, c + 1, push);
+                    if !read_empty(next, c + 1, visit) {
+                        return None;
+                    }
                     next = c + 1;
                     continue;
                 }
-                Cell::NumberCell { v, .. } => ArrayNode::Number(*v),
-                Cell::BooleanCell { v, .. } => ArrayNode::Boolean(*v),
-                Cell::ErrorCell { ei, .. } => ArrayNode::Error(ei.clone()),
-                Cell::SharedString { si, .. } => match shared_strings.get(*si as usize) {
-                    Some(s) => ArrayNode::String(s.clone()),
-                    None => ArrayNode::Error(Error::ERROR),
-                },
-                Cell::CellFormula { .. } | Cell::ArrayFormula { .. } | Cell::SpillCell { .. } => {
-                    read_empty(next, c, push);
-                    // The formulas that follow it without a gap go with it.
-                    let mut resume = c + 1;
-                    for (following, cell) in cells.by_ref() {
-                        let is_constant = !matches!(
-                            *cell,
-                            Cell::CellFormula { .. }
-                                | Cell::ArrayFormula { .. }
-                                | Cell::SpillCell { .. }
-                        );
-                        if following != resume || is_constant {
-                            break;
-                        }
-                        resume += 1;
-                    }
-                    return (c, resume);
-                }
+                Cell::NumberCell { v, .. } => Some(RangeValue::Number(*v)),
+                Cell::BooleanCell { v, .. } => Some(RangeValue::Boolean(*v)),
+                Cell::SharedString { si, .. } => shared_strings
+                    .get(*si as usize)
+                    .map(|s| RangeValue::Text(s.as_str())),
+                Cell::ErrorCell { .. }
+                | Cell::CellFormula { .. }
+                | Cell::ArrayFormula { .. }
+                | Cell::SpillCell { .. } => None,
             };
-            read_empty(next, c, push);
-            push(value);
+            if !read_empty(next, c, visit) {
+                return None;
+            }
+            let Some(value) = value else {
+                // The formulas that follow it without a gap go with it.
+                let mut resume = c + 1;
+                for (following, cell) in cells.by_ref() {
+                    let is_formula = matches!(
+                        *cell,
+                        Cell::CellFormula { .. }
+                            | Cell::ArrayFormula { .. }
+                            | Cell::SpillCell { .. }
+                    );
+                    if following != resume || !is_formula {
+                        break;
+                    }
+                    resume += 1;
+                }
+                return Some((c, resume));
+            };
+            if !visit(value) {
+                return None;
+            }
             next = c + 1;
         }
-        read_empty(next, last_column + 1, push);
-        (last_column + 1, last_column + 1)
+        if !read_empty(next, last_column + 1, visit) {
+            return None;
+        }
+        Some((last_column + 1, last_column + 1))
     }
 
     #[inline(always)]
@@ -4176,6 +4291,30 @@ impl<'a> Model<'a> {
             self.locale,
             self.language,
         )
+    }
+}
+
+/// One value of a range as `Model::walk_row` hands it over: what
+/// `evaluate_cell` gives for the cell, with a text lent and not copied.
+pub(crate) enum RangeValue<'v> {
+    Number(f64),
+    Boolean(bool),
+    Text(&'v str),
+    /// An error, as `evaluate_cell` gives it: origin and message included.
+    Error(CalcResult),
+    Empty,
+}
+
+impl RangeValue<'_> {
+    pub(crate) fn to_array_node(&self) -> ArrayNode {
+        match self {
+            RangeValue::Number(v) => ArrayNode::Number(*v),
+            RangeValue::Boolean(b) => ArrayNode::Boolean(*b),
+            RangeValue::Text(s) => ArrayNode::String(s.to_string()),
+            RangeValue::Error(CalcResult::Error { error, .. }) => ArrayNode::Error(error.clone()),
+            RangeValue::Error(_) => ArrayNode::Error(Error::ERROR),
+            RangeValue::Empty => ArrayNode::Empty,
+        }
     }
 }
 

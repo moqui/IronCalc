@@ -48,29 +48,10 @@ impl<'a> Model<'a> {
                     }
                 },
                 CalcResult::Range { left, right } => {
-                    if left.sheet != right.sheet {
-                        return CalcResult::new_error(
-                            Error::VALUE,
-                            cell,
-                            "Ranges are in different sheets".to_string(),
-                        );
-                    }
-                    for row in left.row..(right.row + 1) {
-                        for column in left.column..(right.column + 1) {
-                            match self.evaluate_cell(CellReferenceIndex {
-                                sheet: left.sheet,
-                                row,
-                                column,
-                            }) {
-                                CalcResult::Number(value) => {
-                                    result = pick(value, result);
-                                }
-                                error @ CalcResult::Error { .. } => return error,
-                                _ => {
-                                    // We ignore booleans and strings
-                                }
-                            }
-                        }
+                    if let Err(error) = self.for_each_number_in_range(left, right, cell, |value| {
+                        result = pick(value, result);
+                    }) {
+                        return error;
                     }
                 }
                 CalcResult::Array(array) => {
@@ -305,43 +286,10 @@ impl<'a> Model<'a> {
 
             match self.evaluate_node_in_context(arg, cell) {
                 CalcResult::Range { left, right } => {
-                    if left.sheet != right.sheet {
-                        return CalcResult::new_error(
-                            Error::VALUE,
-                            cell,
-                            "Ranges are in different sheets".to_string(),
-                        );
-                    }
-                    // TODO: We should do this for all functions that run through ranges
-                    // Running cargo test for the ironcalc takes around .8 seconds with this speedup
-                    // and ~ 3.5 seconds without it. Note that once properly in place sheet.dimension should be almost a noop
-                    let row1 = left.row;
-                    let mut row2 = right.row;
-                    let column1 = left.column;
-                    let mut column2 = right.column;
-                    match self.clip_to_used_area(left.sheet, row1, column1, row2, column2) {
-                        Ok((r, c)) => {
-                            row2 = r;
-                            column2 = c;
-                        }
-                        Err(message) => return CalcResult::new_error(Error::ERROR, cell, message),
-                    }
-                    for row in row1..row2 + 1 {
-                        for column in column1..(column2 + 1) {
-                            match self.evaluate_cell(CellReferenceIndex {
-                                sheet: left.sheet,
-                                row,
-                                column,
-                            }) {
-                                CalcResult::Number(value) => {
-                                    result += value;
-                                }
-                                error @ CalcResult::Error { .. } => return error,
-                                _ => {
-                                    // We ignore booleans and strings
-                                }
-                            }
-                        }
+                    if let Err(error) = self.for_each_number_in_range(left, right, cell, |value| {
+                        result += value;
+                    }) {
+                        return error;
                     }
                 }
                 CalcResult::Array(array) => {
@@ -388,43 +336,10 @@ impl<'a> Model<'a> {
             match self.evaluate_node_in_context(arg, cell) {
                 CalcResult::Number(value) => result += value * value,
                 CalcResult::Range { left, right } => {
-                    if left.sheet != right.sheet {
-                        return CalcResult::new_error(
-                            Error::VALUE,
-                            cell,
-                            "Ranges are in different sheets".to_string(),
-                        );
-                    }
-                    // TODO: We should do this for all functions that run through ranges
-                    // Running cargo test for the ironcalc takes around .8 seconds with this speedup
-                    // and ~ 3.5 seconds without it. Note that once properly in place sheet.dimension should be almost a noop
-                    let row1 = left.row;
-                    let mut row2 = right.row;
-                    let column1 = left.column;
-                    let mut column2 = right.column;
-                    match self.clip_to_used_area(left.sheet, row1, column1, row2, column2) {
-                        Ok((r, c)) => {
-                            row2 = r;
-                            column2 = c;
-                        }
-                        Err(message) => return CalcResult::new_error(Error::ERROR, cell, message),
-                    }
-                    for row in row1..row2 + 1 {
-                        for column in column1..(column2 + 1) {
-                            match self.evaluate_cell(CellReferenceIndex {
-                                sheet: left.sheet,
-                                row,
-                                column,
-                            }) {
-                                CalcResult::Number(value) => {
-                                    result += value * value;
-                                }
-                                error @ CalcResult::Error { .. } => return error,
-                                _ => {
-                                    // We ignore booleans and strings
-                                }
-                            }
-                        }
+                    if let Err(error) = self.for_each_number_in_range(left, right, cell, |value| {
+                        result += value * value;
+                    }) {
+                        return error;
                     }
                 }
                 CalcResult::Array(array) => {

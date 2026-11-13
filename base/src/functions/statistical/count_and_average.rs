@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 
 use crate::expressions::parser::ArrayNode;
 use crate::expressions::types::CellReferenceIndex;
+use crate::model::RangeValue;
 use crate::number_format::parse_finite_number;
 use crate::{
     calc_result::CalcResult, expressions::parser::Node, expressions::token::Error, model::Model,
@@ -61,36 +62,7 @@ impl<'a> Model<'a> {
                     }
                 }
                 CalcResult::Range { left, right } => {
-                    if left.sheet != right.sheet {
-                        return Err(CalcResult::new_error(
-                            Error::VALUE,
-                            cell,
-                            "Ranges are in different sheets".to_string(),
-                        ));
-                    }
-
-                    for row in left.row..=right.row {
-                        for column in left.column..=right.column {
-                            match self.evaluate_cell(CellReferenceIndex {
-                                sheet: left.sheet,
-                                row,
-                                column,
-                            }) {
-                                CalcResult::Number(value) => {
-                                    f(value);
-                                }
-                                error @ CalcResult::Error { .. } => return Err(error),
-                                CalcResult::Range { .. } => {
-                                    return Err(CalcResult::new_error(
-                                        Error::ERROR,
-                                        cell,
-                                        "Unexpected Range".to_string(),
-                                    ));
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+                    self.for_each_number_in_range(left, right, cell, &mut f)?;
                 }
                 error @ CalcResult::Error { .. } => return Err(error),
                 // Everything else is ignored
@@ -351,16 +323,27 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
-                    for row in left.row..(right.row + 1) {
-                        for column in left.column..(right.column + 1) {
-                            if let CalcResult::Number(_) = self.evaluate_cell(CellReferenceIndex {
-                                sheet: left.sheet,
-                                row,
-                                column,
-                            }) {
+                    // Errors are not counted, and do not stop the count
+                    let Ok((last_row, last_column)) = self.clip_to_used_area(
+                        left.sheet,
+                        left.row,
+                        left.column,
+                        right.row,
+                        right.column,
+                    ) else {
+                        return CalcResult::new_error(
+                            Error::ERROR,
+                            cell,
+                            format!("Invalid worksheet index: '{}'", left.sheet),
+                        );
+                    };
+                    for row in left.row..=last_row {
+                        self.walk_row(left.sheet, row, left.column, last_column, &mut |value| {
+                            if let RangeValue::Number(_) = value {
                                 result += 1.0;
                             }
-                        }
+                            true
+                        });
                     }
                 }
                 _ => {
