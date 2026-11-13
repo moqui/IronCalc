@@ -788,3 +788,71 @@ fn the_memory_of_a_sheet_grows_with_its_cells() {
     data.remove_row(3);
     assert_eq!(data.heap_size(), numbers + constants);
 }
+
+#[test]
+fn the_changes_record_what_was_written() {
+    let mut data = SheetData::new();
+    assert!(data.take_changes().is_empty());
+    // a row, then the rows below it: one area
+    data.set_row(1, (1..=5).map(|column| (column, number(1.0))));
+    data.set_row(2, (1..=5).map(|column| (column, text(column))));
+    data.set_cell(3, 1, number(2.0));
+    data.set_cell(3, 2, number(2.0));
+    let changes = data.take_changes();
+    assert!(!changes.anything());
+    assert_eq!(
+        changes.areas(),
+        [
+            ChangedArea {
+                row1: 1,
+                column1: 1,
+                row2: 2,
+                column2: 5
+            },
+            ChangedArea {
+                row1: 3,
+                column1: 1,
+                row2: 3,
+                column2: 2
+            }
+        ]
+    );
+    // taken: a fresh record
+    assert!(data.take_changes().is_empty());
+    // a cell changed in place, removed, a row removed
+    *data.cell_mut(2, 3).unwrap() = number(9.0);
+    data.remove_cell(1, 5);
+    data.remove_row(3);
+    let areas: Vec<ChangedArea> = data.take_changes().areas().to_vec();
+    assert_eq!(areas.len(), 3);
+    assert_eq!(
+        areas[2],
+        ChangedArea {
+            row1: 3,
+            column1: 1,
+            row2: 3,
+            column2: 2
+        }
+    );
+    // a row replaced counts what was there and what is there now
+    data.set_row(2, vec![(9, number(1.0))]);
+    assert_eq!(
+        data.take_changes().areas(),
+        [ChangedArea {
+            row1: 2,
+            column1: 1,
+            row2: 2,
+            column2: 9
+        }]
+    );
+    // rows moved: anything may have changed
+    data.displace_rows(1, 1);
+    let changes = data.take_changes();
+    assert!(changes.anything());
+    assert!(changes.areas().is_empty());
+    // too many separate areas: the same
+    for row in 1..=5000 {
+        data.set_cell(row * 2, 1, number(1.0));
+    }
+    assert!(data.take_changes().anything());
+}

@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use bitcode::{Decode, Encode};
 
+use super::changes::Changes;
 use super::row::{Constant, Peek, Row};
 use crate::constants::LAST_ROW;
 use crate::types::Cell;
@@ -34,6 +35,10 @@ pub struct SheetData {
     /// saved; it is found again from the rows.
     #[bitcode(skip)]
     used_area: OnceLock<Option<UsedArea>>,
+    /// What has been written since the changes were last taken: see
+    /// `take_changes`. Not saved.
+    #[bitcode(skip)]
+    changes: Changes,
 }
 
 /// The smallest rectangle that holds every cell of a sheet.
@@ -186,12 +191,14 @@ impl SheetData {
 
     /// The cell at a position, to be changed in place.
     pub fn cell_mut(&mut self, row: i32, column: i32) -> Option<&mut Cell> {
+        self.changes.note(row, column, row, column);
         self.row_mut(row)?.get_mut(column)
     }
 
     /// Puts a cell at a position and returns the one that was there.
     pub fn set_cell(&mut self, row: i32, column: i32, cell: Cell) -> Option<Cell> {
         let old = self.row_or_insert(row)?.insert(column, cell);
+        self.changes.note(row, column, row, column);
         if old.is_none() {
             self.grow_used_area(row, column);
         }
@@ -203,8 +210,9 @@ impl SheetData {
         let row_data = self.row_mut(row)?;
         let cell = row_data.remove(column)?;
         if row_data.is_empty() {
-            self.remove_row(row);
+            self.take_row(row);
         }
+        self.changes.note(row, column, row, column);
         self.forget_used_area();
         Some(cell)
     }
@@ -354,6 +362,9 @@ impl SheetData {
 
     /// Removes every cell of a row, and the row.
     pub fn remove_row(&mut self, row: i32) {
+        if let Some((first, last)) = self.row(row).and_then(Row::columns) {
+            self.changes.note(row, first, row, last);
+        }
         self.take_row(row);
     }
 
@@ -390,6 +401,7 @@ impl SheetData {
         if delta == 0 {
             return;
         }
+        self.changes.note_anything();
         let rows: Vec<i32> = self
             .rows_in_order()
             .map(|(row, _)| row)
@@ -405,7 +417,7 @@ impl SheetData {
         } else {
             for row in rows {
                 if row < first_row {
-                    self.remove_row(row);
+                    self.take_row(row);
                 } else if let Some(data) = self.take_row(row) {
                     self.put_row(row + delta, data);
                 }
@@ -424,6 +436,7 @@ impl SheetData {
         if delta == 0 {
             return;
         }
+        self.changes.note_anything();
         self.forget_used_area();
         let mut emptied = Vec::new();
         for (chunk_index, chunk) in self.chunks.iter_mut().enumerate() {
@@ -442,13 +455,14 @@ impl SheetData {
             }
         }
         for row in emptied {
-            self.remove_row(row);
+            self.take_row(row);
         }
     }
 
     /// Replaces the cells of a row. The row exists afterwards, even with no
     /// cells. If a column is given twice the last one stays.
     pub fn set_row(&mut self, row: i32, cells: impl IntoIterator<Item = (i32, Cell)>) {
+        let before = self.row(row).and_then(Row::columns);
         let Some(row_data) = self.row_or_insert(row) else {
             return;
         };
@@ -473,7 +487,31 @@ impl SheetData {
         }
         cells.shrink_to_fit();
         *row_data = Row::from_cells(cells);
+        // What was there and what is there now
+        let after = row_data.columns();
+        let span = match (before, after) {
+            (Some((a1, a2)), Some((b1, b2))) => Some((a1.min(b1), a2.max(b2))),
+            (span, None) | (None, span) => span,
+        };
+        if let Some((first, last)) = span {
+            self.changes.note(row, first, row, last);
+        }
         self.forget_used_area();
+    }
+
+    /// What has been written to the sheet since the last call, and starts
+    /// a new record. An evaluation takes the changes to know what to
+    /// evaluate again, and takes them once more at its end, so that what it
+    /// wrote itself does not count.
+    pub fn take_changes(&mut self) -> Changes {
+        std::mem::take(&mut self.changes)
+    }
+
+    /// Says that anything in the sheet may have changed, for a change the
+    /// cells do not show: a row hidden or shown (SUBTOTAL leaves hidden rows
+    /// out).
+    pub fn note_anything_changed(&mut self) {
+        self.changes.note_anything();
     }
 }
 

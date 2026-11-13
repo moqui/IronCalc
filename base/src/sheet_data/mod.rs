@@ -43,11 +43,13 @@
 //! read was two hashes and two jumps to unrelated places in memory, which on a
 //! large sheet cost more than running the formulas.
 
+mod changes;
 mod chunks;
 mod row;
 mod saved;
 #[cfg(test)]
 mod test;
 
+pub use changes::{ChangedArea, Changes};
 pub use chunks::{SheetData, UsedArea};
 pub(crate) use row::{Constant, Peek};

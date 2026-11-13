@@ -395,6 +395,7 @@ impl Worksheet {
         if !is_valid_row(row) {
             return Err(format!("Row number '{row}' is not valid."));
         }
+        self.sheet_data.note_anything_changed();
 
         let rows = &mut self.rows;
         for r in rows.iter_mut() {
