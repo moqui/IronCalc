@@ -17,6 +17,9 @@
 //! Defaults: 100,000 rows, 300 formulas in the mix. With `only`, the name of
 //! one of the formulas, that formula is evaluated `times` times (20) and
 //! nothing else is, which is what a profiler wants.
+//!
+//! With `RELOAD` set in the environment the workbook is saved as bytes and
+//! read back before anything is evaluated, as a stored workbook is opened.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,48 +106,48 @@ fn build(rows: i32) -> Result<Model<'static>, String> {
     let statuses: Vec<i32> = STATUSES.iter().map(|s| text(s.to_string())).collect();
     let regions: Vec<i32> = REGIONS.iter().map(|s| text(s.to_string())).collect();
     let channels: Vec<i32> = CHANNELS.iter().map(|s| text(s.to_string())).collect();
-    let mut random = Random(0x9E37_79B9_7F4A_7C15);
-    let pick = |from: &[i32], random: &mut Random| Cell::SharedString {
-        si: from[random.below(from.len() as u64) as usize],
-        s: 0,
-    };
-    for row in 2..=rows + 1 {
+    // A row of the data sheet; the generator makes the same rows again
+    // when started again
+    let row_cells = |row: i32, random: &mut Random| -> Vec<(i32, Cell)> {
+        let pick = |from: &[i32], random: &mut Random| Cell::SharedString {
+            si: from[random.below(from.len() as u64) as usize],
+            s: 0,
+        };
+        let number = |v: f64| Cell::NumberCell { v, s: 0 };
         let quantity = (1 + random.below(20)) as f64;
         let price = (100 + random.below(9900)) as f64 / 100.0;
-        let mut cells = vec![
-            (
-                1,
-                Cell::NumberCell {
-                    v: (row - 1) as f64,
-                    s: 0,
-                },
-            ),
-            (2, pick(&customers, &mut random)),
-            (3, pick(&statuses, &mut random)),
-            (4, pick(&regions, &mut random)),
-            (5, pick(&products, &mut random)),
-            (6, pick(&channels, &mut random)),
-            (7, pick(&notes, &mut random)),
-            (8, Cell::NumberCell { v: quantity, s: 0 }),
-            (9, Cell::NumberCell { v: price, s: 0 }),
-            (
-                10,
-                Cell::NumberCell {
-                    v: quantity * price,
-                    s: 0,
-                },
-            ),
-        ];
+        let mut cells = Vec::with_capacity(20);
+        cells.push((1, number((row - 1) as f64)));
+        cells.push((2, pick(&customers, random)));
+        cells.push((3, pick(&statuses, random)));
+        cells.push((4, pick(&regions, random)));
+        cells.push((5, pick(&products, random)));
+        cells.push((6, pick(&channels, random)));
+        cells.push((7, pick(&notes, random)));
+        cells.push((8, number(quantity)));
+        cells.push((9, number(price)));
+        cells.push((10, number(quantity * price)));
         for column in 11..=20 {
-            let v = random.below(100_000) as f64 / 100.0;
-            cells.push((column, Cell::NumberCell { v, s: 0 }));
+            cells.push((column, number(random.below(100_000) as f64 / 100.0)));
         }
-        let numbers: Vec<(i32, Cell)> = cells[7..]
-            .iter()
-            .enumerate()
-            .map(|(index, (_, cell))| (index as i32 + 1, cell.clone()))
-            .collect();
+        cells
+    };
+    // One sheet after the other, each row made at its size, as a table
+    // read from a database is loaded
+    let seed = 0x9E37_79B9_7F4A_7C15;
+    let mut random = Random(seed);
+    for row in 2..=rows + 1 {
+        let cells = row_cells(row, &mut random);
         workbook.worksheets[1].sheet_data.set_row(row, cells);
+    }
+    let mut random = Random(seed);
+    for row in 2..=rows + 1 {
+        let numbers: Vec<(i32, Cell)> = row_cells(row, &mut random)
+            .into_iter()
+            .skip(7)
+            .enumerate()
+            .map(|(index, (_, cell))| (index as i32 + 1, cell))
+            .collect();
         workbook.worksheets[2].sheet_data.set_row(row, numbers);
     }
     workbook.shared_strings = strings;
@@ -297,6 +300,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         megabytes(LIVE.load(Ordering::Relaxed) - empty),
         megabytes(model.to_bytes().len() as u64)
     );
+    if std::env::var("RELOAD").is_ok() {
+        model = Model::from_bytes(&model.to_bytes(), "en")?;
+    }
     let all = formulas();
 
     if let Some(name) = only {
