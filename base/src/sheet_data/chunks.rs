@@ -499,6 +499,26 @@ impl SheetData {
         self.forget_used_area();
     }
 
+    /// Hands the index of every shared string the sheet shows to `f`.
+    pub fn for_each_shared_string(&self, mut f: impl FnMut(i32)) {
+        for chunk in self.chunks.iter().flatten() {
+            for row in chunk.rows.iter().flatten() {
+                row.for_each_shared_string(&mut f);
+            }
+        }
+    }
+
+    /// Gives every shared string the sheet shows its new index,
+    /// `renumbered[old]`. What the cells show does not change, so it is not
+    /// recorded as written.
+    pub fn renumber_shared_strings(&mut self, renumbered: &[i32]) {
+        for chunk in self.chunks.iter_mut().flatten() {
+            for row in chunk.rows.iter_mut().flatten() {
+                row.renumber_shared_strings(renumbered);
+            }
+        }
+    }
+
     /// What has been written to the sheet since the last call, and starts
     /// a new record. An evaluation takes the changes to know what to
     /// evaluate again, and takes them once more at its end, so that what it

@@ -666,7 +666,7 @@ impl<'a> Model<'a> {
 
         let mut model = Model {
             workbook,
-            shared_strings: HashMap::new(),
+            shared_strings: Default::default(),
             parsed_formulas,
             shared_formula_lookup: Vec::new(),
             parsed_defined_names: HashMap::new(),

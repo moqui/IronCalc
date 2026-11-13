@@ -399,6 +399,17 @@ impl<'a> UserModel<'a> {
         Ok(())
     }
 
+    /// Drops the shared strings no cell shows: see
+    /// [Model::compact_shared_strings]. The history kept so far is
+    /// forgotten, since its diffs hold the old indexes.
+    pub fn compact_shared_strings(&mut self) -> usize {
+        let dropped = self.model.compact_shared_strings();
+        if dropped > 0 {
+            self.history = History::default();
+        }
+        dropped
+    }
+
     /// See [Model::intern_shared_string].
     pub fn intern_shared_string(&mut self, text: &str) -> i32 {
         self.model.intern_shared_string(text)

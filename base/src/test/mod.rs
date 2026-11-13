@@ -158,6 +158,7 @@ mod test_range_evaluation;
 mod test_range_walk;
 mod test_replace_rows;
 mod test_set_functions_error_handling;
+mod test_shared_strings;
 mod test_sheet_names;
 mod test_spill_functions;
 mod test_today;

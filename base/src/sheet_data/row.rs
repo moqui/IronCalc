@@ -704,6 +704,55 @@ impl Row {
     }
 }
 
+impl Row {
+    /// Hands the index of every shared string of the row to `f`.
+    pub(super) fn for_each_shared_string(&self, f: &mut impl FnMut(i32)) {
+        match self {
+            Row::Cells(cells) => {
+                for (_, cell) in cells {
+                    if let Cell::SharedString { si, .. } = cell {
+                        f(*si);
+                    }
+                }
+            }
+            Row::Constants { cells, .. } => {
+                for constant in cells {
+                    if let Constant::Text { si, .. } = constant {
+                        f(*si);
+                    }
+                }
+            }
+            Row::Numbers { .. } => {}
+        }
+    }
+
+    /// Gives every shared string of the row its new index, `renumbered[old]`.
+    pub(super) fn renumber_shared_strings(&mut self, renumbered: &[i32]) {
+        let new = |si: &mut i32| {
+            if let Some(index) = usize::try_from(*si).ok().and_then(|at| renumbered.get(at)) {
+                *si = *index;
+            }
+        };
+        match self {
+            Row::Cells(cells) => {
+                for (_, cell) in cells {
+                    if let Cell::SharedString { si, .. } = cell {
+                        new(si);
+                    }
+                }
+            }
+            Row::Constants { cells, .. } => {
+                for constant in cells {
+                    if let Constant::Text { si, .. } = constant {
+                        new(si);
+                    }
+                }
+            }
+            Row::Numbers { .. } => {}
+        }
+    }
+}
+
 /// Two rows are equal when they have the same cells, however they hold them.
 impl PartialEq for Row {
     fn eq(&self, other: &Self) -> bool {

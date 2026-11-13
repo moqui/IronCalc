@@ -1,6 +1,7 @@
 #![deny(missing_docs)]
 
 use crate::dependencies::{Dependencies, Rect};
+use crate::shared_strings::SharedStringIndex;
 use crate::sheet_data::{Constant, Peek};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -323,7 +324,7 @@ pub struct Model<'a> {
     /// A list of parsed defined names
     pub(crate) parsed_defined_names: HashMap<(Option<u32>, String), ParsedDefinedName>,
     /// An optimization to lookup strings faster
-    pub(crate) shared_strings: HashMap<String, usize>,
+    pub(crate) shared_strings: SharedStringIndex,
     /// An instance of the parser
     pub(crate) parser: Parser<'a>,
     /// The locale of the model
@@ -2240,10 +2241,7 @@ impl<'a> Model<'a> {
             locale,
             language,
         );
-        let mut shared_strings = HashMap::new();
-        for (index, s) in workbook.shared_strings.iter().enumerate() {
-            shared_strings.insert(s.to_string(), index);
-        }
+        let shared_strings = SharedStringIndex::of(&workbook.shared_strings);
 
         let mut model = Model {
             workbook,
@@ -3273,19 +3271,22 @@ impl<'a> Model<'a> {
         value: &str,
         style: i32,
     ) -> Result<(), String> {
-        match self.shared_strings.get(value) {
+        match self
+            .shared_strings
+            .get(&self.workbook.shared_strings, value)
+        {
             Some(string_index) => {
                 self.workbook.worksheet_mut(sheet)?.set_cell_with_string(
                     row,
                     column,
-                    *string_index as i32,
+                    string_index as i32,
                     style,
                 )?;
             }
             None => {
                 let string_index = self.workbook.shared_strings.len();
                 self.workbook.shared_strings.push(value.to_string());
-                self.shared_strings.insert(value.to_string(), string_index);
+                self.shared_strings.insert(value, string_index);
                 self.workbook.worksheet_mut(sheet)?.set_cell_with_string(
                     row,
                     column,
@@ -3844,13 +3845,54 @@ impl<'a> Model<'a> {
     /// added if it is not there: what a `Cell::SharedString` holds, for
     /// cells made outside the editing functions (`replace_rows`).
     pub fn intern_shared_string(&mut self, text: &str) -> i32 {
-        if let Some(index) = self.shared_strings.get(text) {
-            return *index as i32;
+        if let Some(index) = self.shared_strings.get(&self.workbook.shared_strings, text) {
+            return index as i32;
         }
         let index = self.workbook.shared_strings.len();
         self.workbook.shared_strings.push(text.to_string());
-        self.shared_strings.insert(text.to_string(), index);
+        self.shared_strings.insert(text, index);
         index as i32
+    }
+
+    /// Drops the shared strings no cell shows any more, and numbers the rest
+    /// again in every cell. A text stays in the list after the last cell
+    /// showing it is changed or removed, so a workbook whose data is loaded
+    /// again and again (`replace_rows`) keeps every text it ever held until
+    /// this is called. Returns how many were dropped.
+    ///
+    /// What holds an index into the list outside the cells holds a wrong one
+    /// afterwards: `UserModel::compact_shared_strings` forgets its history
+    /// for that reason.
+    pub fn compact_shared_strings(&mut self) -> usize {
+        let count = self.workbook.shared_strings.len();
+        let mut used = vec![false; count];
+        for worksheet in &self.workbook.worksheets {
+            worksheet.sheet_data.for_each_shared_string(|si| {
+                if let Some(slot) = usize::try_from(si).ok().and_then(|at| used.get_mut(at)) {
+                    *slot = true;
+                }
+            });
+        }
+        if used.iter().all(|u| *u) {
+            return 0;
+        }
+        let old = std::mem::take(&mut self.workbook.shared_strings);
+        let mut renumbered = vec![-1; count];
+        let mut kept = Vec::with_capacity(used.iter().filter(|u| **u).count());
+        for (index, text) in old.into_iter().enumerate() {
+            if used[index] {
+                renumbered[index] = kept.len() as i32;
+                kept.push(text);
+            }
+        }
+        for worksheet in &mut self.workbook.worksheets {
+            worksheet.sheet_data.renumber_shared_strings(&renumbered);
+        }
+        let dropped = count - kept.len();
+        kept.shrink_to_fit();
+        self.shared_strings = SharedStringIndex::of(&kept);
+        self.workbook.shared_strings = kept;
+        dropped
     }
 
     /// What the workbook takes in memory, in bytes, as far as the model can
@@ -3859,8 +3901,8 @@ impl<'a> Model<'a> {
     /// the styles and what the allocator adds are left out. It costs a look
     /// at every row, not at every cell.
     pub fn memory_usage(&self) -> MemoryUsage {
-        let shared_strings = self.workbook.shared_strings.capacity()
-            * std::mem::size_of::<String>()
+        let shared_strings = self.shared_strings.heap_size()
+            + self.workbook.shared_strings.capacity() * std::mem::size_of::<String>()
             + self
                 .workbook
                 .shared_strings

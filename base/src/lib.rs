@@ -61,6 +61,7 @@ mod implicit_intersection;
 pub mod links;
 mod merged_cells;
 mod model;
+mod shared_strings;
 mod styles;
 mod tz;
 mod units;
