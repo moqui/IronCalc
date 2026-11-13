@@ -21,64 +21,90 @@ impl<'a> Model<'a> {
             return CalcResult::new_args_number_error(cell);
         }
 
-        // Evaluate all arrays up front.
-        let mut arrays: Vec<Vec<Vec<f64>>> = Vec::with_capacity(args.len());
-        let mut ref_rows: Option<usize> = None;
-        let mut ref_cols: Option<usize> = None;
+        // Every array as its numbers, row after row: non-numeric → 0.0,
+        // errors propagate. A range is read into them directly; a column of
+        // a hundred thousand rows is that many numbers and nothing else.
+        let mut arrays: Vec<Vec<f64>> = Vec::with_capacity(args.len());
+        let mut size: Option<(usize, usize)> = None;
+        let mut same_size = |rows: usize, cols: usize| -> bool {
+            *size.get_or_insert((rows, cols)) == (rows, cols)
+        };
+        let mismatch = || {
+            CalcResult::new_error(
+                Error::VALUE,
+                cell,
+                "SUMPRODUCT: arrays must have the same dimensions".to_string(),
+            )
+        };
+        let number = |node: &ArrayNode| -> Result<f64, Error> {
+            match node {
+                ArrayNode::Number(v) => Ok(*v),
+                ArrayNode::Boolean(_) | ArrayNode::String(_) | ArrayNode::Empty => Ok(0.0),
+                ArrayNode::Error(e) => Err(e.clone()),
+            }
+        };
+        let error = |error: Error| CalcResult::Error {
+            error,
+            origin: cell,
+            message: String::new(),
+        };
 
         for arg in args {
-            let arr = match self.eval_to_array(arg, cell) {
-                Ok(a) => a,
-                Err(e) => return e,
-            };
-            let rows = arr.len();
-            let cols = if rows == 0 { 0 } else { arr[0].len() };
-
-            if let Some(r) = ref_rows {
-                if rows != r || cols != ref_cols.unwrap_or(0) {
-                    return CalcResult::new_error(
-                        Error::VALUE,
-                        cell,
-                        "SUMPRODUCT: arrays must have the same dimensions".to_string(),
-                    );
+            let mut numbers: Vec<f64>;
+            match self.evaluate_node_in_context(arg, cell) {
+                CalcResult::Range { left, right } => {
+                    let rows = (right.row - left.row + 1).max(0) as usize;
+                    let cols = (right.column - left.column + 1).max(0) as usize;
+                    if !same_size(rows, cols) {
+                        // Read all the same: what it evaluates stays evaluated
+                        self.evaluate_range(left, right);
+                        return mismatch();
+                    }
+                    numbers = Vec::with_capacity(rows * cols);
+                    let mut first_error = None;
+                    for row in left.row..=right.row {
+                        self.read_row(left.sheet, row, left.column, right.column, &mut |node| {
+                            match number(&node) {
+                                Ok(v) => numbers.push(v),
+                                Err(e) => {
+                                    first_error.get_or_insert(e);
+                                }
+                            }
+                        });
+                    }
+                    if let Some(e) = first_error {
+                        return error(e);
+                    }
                 }
-            } else {
-                ref_rows = Some(rows);
-                ref_cols = Some(cols);
-            }
-
-            // Coerce to f64: non-numeric → 0.0, errors propagate.
-            let mut num_arr: Vec<Vec<f64>> = Vec::with_capacity(rows);
-            for row in &arr {
-                let mut num_row: Vec<f64> = Vec::with_capacity(row.len());
-                for node in row {
-                    let v = match node {
-                        ArrayNode::Number(v) => *v,
-                        ArrayNode::Boolean(_) | ArrayNode::String(_) | ArrayNode::Empty => 0.0,
-                        ArrayNode::Error(e) => {
-                            return CalcResult::Error {
-                                error: e.clone(),
-                                origin: cell,
-                                message: String::new(),
+                result => {
+                    let arr = match self.result_to_array(result, cell) {
+                        Ok(a) => a,
+                        Err(e) => return e,
+                    };
+                    let rows = arr.len();
+                    let cols = if rows == 0 { 0 } else { arr[0].len() };
+                    if !same_size(rows, cols) {
+                        return mismatch();
+                    }
+                    numbers = Vec::with_capacity(rows * cols);
+                    for row in &arr {
+                        for node in row {
+                            match number(node) {
+                                Ok(v) => numbers.push(v),
+                                Err(e) => return error(e),
                             }
                         }
-                    };
-                    num_row.push(v);
+                    }
                 }
-                num_arr.push(num_row);
             }
-            arrays.push(num_arr);
+            arrays.push(numbers);
         }
 
-        let rows = ref_rows.unwrap_or(0);
-        let cols = ref_cols.unwrap_or(0);
+        let (rows, cols) = size.unwrap_or((0, 0));
         let mut total = 0.0f64;
-
-        for i in 0..rows {
-            for j in 0..cols {
-                let product = arrays.iter().map(|a| a[i][j]).product::<f64>();
-                total += product;
-            }
+        for index in 0..rows * cols {
+            let product = arrays.iter().map(|a| a[index]).product::<f64>();
+            total += product;
         }
 
         CalcResult::Number(total)

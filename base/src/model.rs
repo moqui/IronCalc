@@ -1756,7 +1756,7 @@ impl<'a> Model<'a> {
 
     /// Evaluates the cells of a row from `first_column` to `last_column`, in
     /// order, and hands the value of each to `push`.
-    fn read_row(
+    pub(crate) fn read_row(
         &mut self,
         sheet: u32,
         row: i32,

@@ -88,3 +88,46 @@ fn test_sumproduct_2d() {
     // 1*5 + 2*6 + 3*7 + 4*8 = 5+12+21+32 = 70
     assert_eq!(model._get_text("E1"), "70");
 }
+
+#[test]
+fn ranges_of_everything_a_sheet_can_hold() {
+    let mut model = new_empty_model();
+    // Numbers, a formula, a text, a boolean and a gap count as they always did
+    model._set("A1", "2");
+    model._set("A2", "=1+2");
+    model._set("A3", "text");
+    model._set("A4", "TRUE");
+    model._set("A6", "4");
+    for row in 1..=6 {
+        model._set(&format!("B{row}"), &format!("{row}"));
+        model._set(&format!("C{row}"), "10");
+    }
+    model._set("D1", "=1/0");
+    model._set("D2", "=NA()");
+
+    model._set("E1", "=SUMPRODUCT(A1:A6,B1:B6)");
+    model._set("E2", "=SUMPRODUCT(A1:A6,B1:B6,C1:C6)");
+    model._set("E3", "=SUMPRODUCT(A1:B3,B1:C3)");
+    model._set("E4", "=SUMPRODUCT(B1:B6)");
+    // The first error, row by row, of the first array that has one
+    model._set("E5", "=SUMPRODUCT(B1:B2,D1:D2)");
+    model._set("E6", "=SUMPRODUCT(D2:D2,D1:D1)");
+    // A different size is an error whatever the arrays hold
+    model._set("E7", "=SUMPRODUCT(A1:A6,B1:B5)");
+    model._set("E8", "=SUMPRODUCT(A1:A6,D1:E3)");
+    // A range with an array, and a single cell
+    model._set("E9", "=SUMPRODUCT(B1:B3,{1;10;100})");
+    model._set("E10", "=SUMPRODUCT(A1,B2)");
+    model.evaluate();
+
+    assert_eq!(model._get_text("E1"), *"32");
+    assert_eq!(model._get_text("E2"), *"320");
+    assert_eq!(model._get_text("E3"), *"68");
+    assert_eq!(model._get_text("E4"), *"21");
+    assert_eq!(model._get_text("E5"), *"#DIV/0!");
+    assert_eq!(model._get_text("E6"), *"#N/A");
+    assert_eq!(model._get_text("E7"), *"#VALUE!");
+    assert_eq!(model._get_text("E8"), *"#VALUE!");
+    assert_eq!(model._get_text("E9"), *"321");
+    assert_eq!(model._get_text("E10"), *"4");
+}
