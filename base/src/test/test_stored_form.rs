@@ -33,10 +33,26 @@ fn a_workbook_stored_before_versions_is_read() {
     // Stored again, it has a version, and reads the same
     let bytes = model.to_bytes();
     assert!(bytes.starts_with(b"\0ICW"));
-    assert_eq!(&bytes[4..6], &1u16.to_le_bytes());
+    assert_eq!(&bytes[4..6], &2u16.to_le_bytes());
     let mut again = Model::from_bytes(&bytes, "en").unwrap();
     check(&mut again);
     assert_eq!(again.to_bytes(), bytes);
+}
+
+#[test]
+fn a_workbook_of_version_1_is_read() {
+    // Version 1 is the layout of version 0 behind the mark
+    let mut bytes = b"\0ICW".to_vec();
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(STORED_V0);
+    let mut model = Model::from_bytes(&bytes, "en").unwrap();
+    check(&mut model);
+    assert!(model.workbook.media.is_empty());
+    assert!(model
+        .workbook
+        .worksheets
+        .iter()
+        .all(|w| w.drawings.is_empty()));
 }
 
 #[test]

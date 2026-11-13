@@ -998,6 +998,7 @@ pub(super) fn load_sheet<R: Read + std::io::Seek>(
         show_grid_lines: sheet_view.show_grid_lines,
         conditional_formatting,
         links,
+        drawings: Vec::new(),
     })
 }
 

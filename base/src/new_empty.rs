@@ -56,6 +56,7 @@ impl<'a> Model<'a> {
             show_grid_lines: true,
             conditional_formatting: vec![],
             links: HashMap::new(),
+            drawings: Vec::new(),
         }
     }
 
@@ -535,7 +536,8 @@ impl<'a> Model<'a> {
         if sheet_index >= sheet_count {
             return Err("Sheet index too large".to_string());
         };
-        self.workbook.worksheets.remove(sheet_index as usize);
+        let removed = self.workbook.worksheets.remove(sheet_index as usize);
+        self.forget_sheet_in_drawings(removed.sheet_id);
         self.reset_parsed_structures();
         Ok(())
     }
@@ -658,6 +660,7 @@ impl<'a> Model<'a> {
             },
             tables: HashMap::new(),
             theme: Default::default(),
+            media: Vec::new(),
         };
         let parsed_formulas = Vec::new();
         let worksheets = &workbook.worksheets;

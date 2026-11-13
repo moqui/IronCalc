@@ -776,6 +776,7 @@ impl<'a> Model<'a> {
             },
         )?;
         self.displace_cf_ranges(sheet, &disp);
+        self.displace_drawings(&disp);
 
         // In the list of columns:
         // * Keep all the columns to the left
@@ -898,6 +899,7 @@ impl<'a> Model<'a> {
             },
         )?;
         self.displace_cf_ranges(sheet, &disp);
+        self.displace_drawings(&disp);
         let worksheet = &mut self.workbook.worksheet_mut(sheet)?;
 
         // deletes all the column styles
@@ -1150,6 +1152,7 @@ impl<'a> Model<'a> {
             },
         )?;
         self.displace_cf_ranges(sheet, &disp);
+        self.displace_drawings(&disp);
 
         Ok(())
     }
@@ -1301,6 +1304,7 @@ impl<'a> Model<'a> {
             },
         )?;
         self.displace_cf_ranges(sheet, &disp);
+        self.displace_drawings(&disp);
         Ok(())
     }
 
@@ -1458,6 +1462,7 @@ impl<'a> Model<'a> {
         };
         self.displace_formulas(&disp, CellsMoved::None)?;
         self.displace_cf_ranges(sheet, &disp);
+        self.displace_drawings(&disp);
         Ok(())
     }
 
@@ -1605,6 +1610,7 @@ impl<'a> Model<'a> {
         let disp = DisplaceData::RowMove { sheet, row, delta };
         self.displace_formulas(&disp, CellsMoved::None)?;
         self.displace_cf_ranges(sheet, &disp);
+        self.displace_drawings(&disp);
         Ok(())
     }
 

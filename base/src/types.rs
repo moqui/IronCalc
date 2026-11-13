@@ -1,4 +1,6 @@
 use bitcode::{Decode, Encode};
+
+use crate::drawings::{Drawing, Media};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Display};
 
@@ -133,6 +135,8 @@ pub struct Workbook {
     pub metadata: Metadata,
     pub tables: HashMap<String, Table>,
     pub theme: Theme,
+    /// The bytes of the images the sheets' drawings show.
+    pub media: Vec<Media>,
 }
 
 /// A defined name. The `sheet_id` is the sheet index in case the name is local.
@@ -256,6 +260,8 @@ pub struct Worksheet {
     pub conditional_formatting: Vec<ConditionalFormatting>,
     /// Hyperlinks in the worksheet, keyed by (row, column) of the cell they are attached to
     pub links: HashMap<(i32, i32), Link>,
+    /// Images and charts over the cells, in the order they are drawn.
+    pub drawings: Vec<Drawing>,
 }
 
 /// Internal representation of Excel's sheet_data

@@ -302,7 +302,11 @@ fn test_defined_names_casing() {
     let loaded_workbook = load_from_xlsx(test_file_path, "en", "UTC", "en")
         .unwrap()
         .workbook;
-    let mut model = Model::from_bytes(&bitcode::encode(&loaded_workbook), "en").unwrap();
+    let mut model = Model::from_bytes(
+        &ironcalc_base::stored::workbook_to_bytes(&loaded_workbook),
+        "en",
+    )
+    .unwrap();
 
     let (row, column) = (2, 13); // B13
     let test_cases = [
