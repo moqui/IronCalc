@@ -238,7 +238,7 @@ struct Measured {
 impl Measured {
     fn print(&self, name: &str, value: &str) {
         println!(
-            "{name:<20} {:>10.3} {:>12} {:>9.2}  {value}",
+            "{name:<28} {:>10.3} {:>12} {:>9.2}  {value}",
             self.best.as_secs_f64() * 1000.0,
             self.allocations,
             megabytes(self.peak),
@@ -322,7 +322,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "{:<20} {:>10} {:>12} {:>9}  value",
+        "{:<28} {:>10} {:>12} {:>9}  value",
         "formula", "ms", "allocations", "peak MB"
     );
     for (name, formula) in &all {
@@ -340,5 +340,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         model.set_user_input(0, row, 1, text_of(formula, rows, index / MIX.len()))?;
     }
     evaluate(&mut model, 3).print(&format!("mix of {mix}"), "");
+
+    // Edits after the mix, each evaluated as an edit is: only what it affects
+    println!();
+    println!(
+        "{:<28} {:>10} {:>12} {:>9}  formulas run",
+        "edit", "ms", "allocations", "peak MB"
+    );
+    // A formula of its own over a column the mix does not read
+    let last = rows + 1;
+    model.set_user_input(0, mix as i32 + 2, 1, format!("=SUM(Data!T2:T{last})"))?;
+    model.evaluate_changes();
+    let edits: [(&str, u32, i32, i32, &str); 4] = [
+        ("a cell nothing reads", 0, mix as i32 + 5, 3, "1"),
+        ("a cell one formula reads", 1, 5, 20, "1"),
+        ("a cell all the sums read", 1, 5, 10, "1"),
+        ("a formula of the overlay", 0, 1, 1, "=SUM(Data!J2:J100)"),
+    ];
+    for (name, sheet, row, column, input) in edits {
+        model.set_user_input(sheet, row, column, input.to_string())?;
+        let (measured, run) = evaluate_changes(&mut model);
+        measured.print(name, &run);
+    }
+    println!(
+        "{:<28} {:>9.2} MB",
+        "dependency index",
+        megabytes(model.memory_usage().dependencies as u64)
+    );
+
+    // A chain of formulas, each reading the one above
+    let chain = rows;
+    let mut model = Model::new_empty("chain", "en", "UTC", "en")?;
+    model.set_user_input(0, 1, 1, "1".to_string())?;
+    for row in 2..=chain {
+        model.set_user_input(0, row, 1, format!("=A{}+1", row - 1))?;
+    }
+    evaluate(&mut model, 1).print(&format!("chain of {chain}, full"), "");
+    let edits: [(&str, i32, i32); 3] = [
+        ("chain: a cell nothing reads", 1, 3),
+        ("chain: near its end", chain - 1, 1),
+        ("chain: its head", 1, 1),
+    ];
+    for (name, row, column) in edits {
+        model.set_user_input(0, row, column, "5".to_string())?;
+        let (measured, run) = evaluate_changes(&mut model);
+        measured.print(name, &run);
+    }
+    println!(
+        "{:<28} {:>9.2} MB",
+        "dependency index",
+        megabytes(model.memory_usage().dependencies as u64)
+    );
     Ok(())
+}
+
+/// One `evaluate_changes`, measured, and how many formulas it ran ("all"
+/// when it evaluated everything).
+fn evaluate_changes(model: &mut Model) -> (Measured, String) {
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let live = LIVE.load(Ordering::Relaxed);
+    PEAK.store(live, Ordering::Relaxed);
+    let start = Instant::now();
+    let changes = model.evaluate_changes();
+    let measured = Measured {
+        best: start.elapsed(),
+        allocations: ALLOCATIONS.load(Ordering::Relaxed) - before,
+        peak: PEAK.load(Ordering::Relaxed).saturating_sub(live),
+    };
+    let run = if changes.full {
+        format!("all {}", changes.formulas_run)
+    } else {
+        changes.formulas_run.to_string()
+    };
+    (measured, run)
 }
