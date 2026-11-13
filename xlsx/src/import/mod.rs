@@ -1,4 +1,5 @@
 mod conditional_formatting;
+mod drawings;
 mod metadata;
 pub(crate) mod shared_strings;
 mod sheet_data;
@@ -94,7 +95,19 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
     locale: &str,
     tz: &str,
 ) -> Result<Workbook, XlsxError> {
+    load_xlsx_with_notes(name, reader, locale, tz).map(|(workbook, _)| workbook)
+}
+
+/// Loads a workbook, and says what was left out of it: the drawings the
+/// model does not have (see `drawings.rs`).
+fn load_xlsx_with_notes<R: Read + std::io::Seek>(
+    name: String,
+    reader: R,
+    locale: &str,
+    tz: &str,
+) -> Result<(Workbook, Vec<String>), XlsxError> {
     let mut archive = zip::ZipArchive::new(reader)?;
+    let mut notes = Vec::new();
 
     let mut shared_strings = SharedStringTable::new(read_shared_strings(&mut archive)?);
     let mut workbook = load_workbook(&mut archive)?;
@@ -106,7 +119,7 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
     // stored in x14 `extLst` extensions carry inline `<x14:dxf>` formats that we
     // append to `styles.dxfs`, referencing them back by index from the rule.
     let mut styles = load_styles(&mut archive, &theme)?;
-    let worksheets = load_sheets(
+    let mut worksheets = load_sheets(
         &mut archive,
         &rels,
         &workbook,
@@ -115,6 +128,19 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
         &theme,
         &mut styles.dxfs,
     )?;
+    let sheets: Vec<(String, String)> = workbook
+        .worksheets
+        .iter()
+        .map(|sheet| (sheet.name.clone(), sheet.id.clone()))
+        .collect();
+    let (sheet_parts, chart_sheets) = drawings::sheet_parts(&sheets, &rels);
+    let media = drawings::load_drawings(
+        &mut archive,
+        &sheet_parts,
+        &mut worksheets,
+        &chart_sheets,
+        &mut notes,
+    );
     // reparse formulas in defined names, since they may refer to sheets and tables that have been loaded
     let worksheet_names = worksheets
         .iter()
@@ -137,7 +163,7 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
             }
         }
     };
-    Ok(Workbook {
+    let workbook = Workbook {
         shared_strings: shared_strings.into_strings(),
         defined_names: workbook.defined_names,
         worksheets,
@@ -152,8 +178,9 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
         metadata,
         tables,
         theme,
-        media: Vec::new(),
-    })
+        media,
+    };
+    Ok((workbook, notes))
 }
 
 // Imports a file from disk into an internal representation
@@ -180,6 +207,22 @@ pub fn load_from_xlsx_bytes(
     let cursor = Cursor::new(bytes);
     let reader = BufReader::new(cursor);
     load_xlsx_from_reader(name.to_string(), reader, locale, tz)
+}
+
+/// Loads a [Workbook] from the bytes of an xlsx file, as
+/// [load_from_xlsx_bytes] does, with notes saying what was left out: the
+/// drawings the model does not have (shapes, charts of other types, chart
+/// sheets, images of other formats). An application shows them before the
+/// workbook is saved again without them.
+pub fn load_from_xlsx_bytes_with_notes(
+    bytes: &[u8],
+    name: &str,
+    locale: &str,
+    tz: &str,
+) -> Result<(Workbook, Vec<String>), XlsxError> {
+    let cursor = Cursor::new(bytes);
+    let reader = BufReader::new(cursor);
+    load_xlsx_with_notes(name.to_string(), reader, locale, tz)
 }
 
 /// Loads a [Model] from an xlsx file

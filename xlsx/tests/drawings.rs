@@ -258,3 +258,93 @@ fn opens_in_libreoffice() {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }
+
+fn import(bytes: &[u8]) -> (ironcalc::base::types::Workbook, Vec<String>) {
+    ironcalc::import::load_from_xlsx_bytes_with_notes(bytes, "read", "en", "UTC").unwrap()
+}
+
+#[test]
+fn what_is_written_is_read_back() {
+    let model = workbook();
+    let bytes = save_xlsx_to_writer(&model, Cursor::new(Vec::new()))
+        .unwrap()
+        .into_inner();
+    let (read, notes) = import(&bytes);
+    assert!(notes.is_empty(), "{notes:?}");
+    // The sheets have new ids in the file: compare by position
+    let ids_then: Vec<u32> = model
+        .workbook
+        .worksheets
+        .iter()
+        .map(|w| w.sheet_id)
+        .collect();
+    let ids_now: Vec<u32> = read.worksheets.iter().map(|w| w.sheet_id).collect();
+    for (sheet, worksheet) in read.worksheets.iter().enumerate() {
+        let mut expected = model.workbook.worksheets[sheet].drawings.clone();
+        for drawing in &mut expected {
+            if let DrawingKind::Chart(chart) = &mut drawing.kind {
+                // A pie and a doughnut have no axes to write
+                if matches!(chart.kind, ChartKind::Pie | ChartKind::Doughnut) {
+                    chart.category_axis = Default::default();
+                    chart.value_axis = Default::default();
+                }
+                for series in &mut chart.series {
+                    let renumber = |area: &mut SheetArea| {
+                        let at = ids_then.iter().position(|id| *id == area.sheet_id).unwrap();
+                        area.sheet_id = ids_now[at];
+                    };
+                    renumber(&mut series.values);
+                    if let Some(categories) = &mut series.categories {
+                        renumber(categories);
+                    }
+                    if let Some(SeriesName::Cell(name)) = &mut series.name {
+                        renumber(name);
+                    }
+                }
+            }
+        }
+        assert_eq!(worksheet.drawings, expected, "sheet {sheet}");
+    }
+    assert_eq!(read.media, model.workbook.media);
+}
+
+#[test]
+fn charts_of_other_applications_are_read_and_the_rest_noted() {
+    for (file, charts) in [
+        ("tests/example.xlsx", 1),
+        ("tests/libreoffice_888_example.xlsx", 1),
+        ("tests/custom_theme_colors.xlsx", 1),
+    ] {
+        let bytes = std::fs::read(file).unwrap();
+        let (workbook, notes) = import(&bytes);
+        let found: Vec<&Chart> = workbook
+            .worksheets
+            .iter()
+            .flat_map(|w| &w.drawings)
+            .filter_map(|d| match &d.kind {
+                DrawingKind::Chart(chart) => Some(chart.as_ref()),
+                DrawingKind::Image { .. } => None,
+            })
+            .collect();
+        assert!(
+            found.len() >= charts,
+            "{file}: {} charts, notes {notes:?}",
+            found.len()
+        );
+        assert!(
+            found.iter().all(|chart| !chart.series.is_empty()),
+            "{file}: {found:?}"
+        );
+        // Written again, they are read the same
+        let model = Model::from_workbook(workbook.clone(), "en").unwrap();
+        let bytes = save_xlsx_to_writer(&model, Cursor::new(Vec::new()))
+            .unwrap()
+            .into_inner();
+        let (again, _) = import(&bytes);
+        let drawings = |w: &ironcalc::base::types::Workbook| -> Vec<usize> {
+            w.worksheets.iter().map(|s| s.drawings.len()).collect()
+        };
+        assert_eq!(drawings(&again), drawings(&workbook), "{file}");
+        println!("{file}: {} charts; notes: {notes:?}", found.len());
+    }
+}
