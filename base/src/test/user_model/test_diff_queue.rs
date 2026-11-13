@@ -161,3 +161,33 @@ fn wrong_diffs_handled() {
         .apply_external_diffs("Hello world".as_bytes())
         .is_err());
 }
+
+#[test]
+fn history_and_queue_can_be_off() {
+    let mut model = UserModel::new_empty("model", "en", "UTC", "en").unwrap();
+    model.set_user_input(0, 1, 1, "1").unwrap();
+    assert!(model.can_undo());
+    assert!(!model.flush_send_queue().is_empty());
+    model.set_user_input(0, 1, 2, "2").unwrap();
+
+    // Off: what was kept is forgotten, and nothing more is kept
+    model.set_keeps_history(false);
+    model.set_keeps_send_queue(false);
+    assert!(!model.can_undo());
+    let empty = bitcode::encode(&Vec::<u8>::new());
+    model.set_user_input(0, 1, 3, "=A1+B1").unwrap();
+    assert!(!model.can_undo());
+    model.undo().unwrap();
+    assert_eq!(model.get_formatted_cell_value(0, 1, 3).unwrap(), "3");
+    assert_eq!(model.flush_send_queue(), empty);
+
+    // On again, from here
+    model.set_keeps_history(true);
+    model.set_keeps_send_queue(true);
+    model.set_user_input(0, 1, 1, "10").unwrap();
+    assert!(model.can_undo());
+    assert_ne!(model.flush_send_queue(), empty);
+    model.undo().unwrap();
+    assert_eq!(model.get_formatted_cell_value(0, 1, 3).unwrap(), "3");
+    assert!(!model.can_undo());
+}

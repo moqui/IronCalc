@@ -217,6 +217,10 @@ pub struct UserModel<'a> {
     history: History,
     send_queue: Vec<QueueDiffs>,
     pause_evaluation: bool,
+    /// Whether edits are kept for undo and redo.
+    keeps_history: bool,
+    /// Whether edits are queued for `flush_send_queue`.
+    keeps_send_queue: bool,
     /// What the last evaluation changed.
     last_changes: EvaluationChanges,
     /// What the user is looking at: selected sheet, selection and scroll
@@ -260,6 +264,8 @@ impl<'a> UserModel<'a> {
             history: History::default(),
             send_queue: vec![],
             pause_evaluation: false,
+            keeps_history: true,
+            keeps_send_queue: true,
             last_changes: EvaluationChanges::default(),
             view: WorkbookView::default(),
         };
@@ -283,6 +289,8 @@ impl<'a> UserModel<'a> {
             history: History::default(),
             send_queue: vec![],
             pause_evaluation: false,
+            keeps_history: true,
+            keeps_send_queue: true,
             last_changes: EvaluationChanges::default(),
             view: WorkbookView::default(),
         })
@@ -335,10 +343,12 @@ impl<'a> UserModel<'a> {
     pub fn undo(&mut self) -> Result<(), String> {
         if let Some(diff_list) = self.history.undo() {
             self.apply_undo_diff_list(&diff_list)?;
-            self.send_queue.push(QueueDiffs {
-                r#type: DiffType::Undo,
-                list: diff_list.clone(),
-            });
+            if self.keeps_send_queue {
+                self.send_queue.push(QueueDiffs {
+                    r#type: DiffType::Undo,
+                    list: diff_list.clone(),
+                });
+            }
         };
         Ok(())
     }
@@ -350,10 +360,12 @@ impl<'a> UserModel<'a> {
     pub fn redo(&mut self) -> Result<(), String> {
         if let Some(diff_list) = self.history.redo() {
             self.apply_diff_list(&diff_list)?;
-            self.send_queue.push(QueueDiffs {
-                r#type: DiffType::Redo,
-                list: diff_list.clone(),
-            });
+            if self.keeps_send_queue {
+                self.send_queue.push(QueueDiffs {
+                    r#type: DiffType::Redo,
+                    list: diff_list.clone(),
+                });
+            }
         };
         Ok(())
     }
@@ -366,6 +378,29 @@ impl<'a> UserModel<'a> {
     /// Returns true if there are items to be redone
     pub fn can_redo(&self) -> bool {
         !self.history.redo_stack.is_empty()
+    }
+
+    /// Whether edits are kept for [UserModel::undo] and [UserModel::redo]
+    /// (they are unless said otherwise). Each edit is kept with the cells
+    /// it replaced, so a workbook open for a long time keeps growing; an
+    /// application that keeps its own history, or none, turns this off.
+    /// Turning it off forgets what was kept.
+    pub fn set_keeps_history(&mut self, keeps: bool) {
+        self.keeps_history = keeps;
+        if !keeps {
+            self.history = History::default();
+        }
+    }
+
+    /// Whether edits are queued for [UserModel::flush_send_queue] (they are
+    /// unless said otherwise). An application that does not send them to
+    /// another copy of the workbook turns this off: nothing else empties
+    /// the queue. Turning it off empties it.
+    pub fn set_keeps_send_queue(&mut self, keeps: bool) {
+        self.keeps_send_queue = keeps;
+        if !keeps {
+            self.send_queue = Vec::new();
+        }
     }
 
     /// Pauses automatic evaluation.
@@ -2343,11 +2378,15 @@ impl<'a> UserModel<'a> {
     }
 
     pub(crate) fn push_diff_list(&mut self, diff_list: DiffList) {
-        self.send_queue.push(QueueDiffs {
-            r#type: DiffType::Redo,
-            list: diff_list.clone(),
-        });
-        self.history.push(diff_list);
+        if self.keeps_send_queue {
+            self.send_queue.push(QueueDiffs {
+                r#type: DiffType::Redo,
+                list: diff_list.clone(),
+            });
+        }
+        if self.keeps_history {
+            self.history.push(diff_list);
+        }
     }
 
     pub(super) fn evaluate_if_not_paused(&mut self) {
