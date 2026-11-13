@@ -49,6 +49,15 @@ impl Default for Row {
 /// Where the column is among the cells, or where it would go.
 #[inline]
 fn position(cells: &[(i32, Cell)], column: i32) -> Result<usize, usize> {
+    // In a row filled from the first column on with no gaps, the cell of a
+    // column is at that column's place: one look, where a search takes a few,
+    // each one somewhere else in memory.
+    let guess = (column as usize).wrapping_sub(1);
+    if let Some((c, _)) = cells.get(guess) {
+        if *c == column {
+            return Ok(guess);
+        }
+    }
     if cells.len() <= LINEAR_SEARCH_LIMIT {
         for (index, (c, _)) in cells.iter().enumerate() {
             if *c >= column {
