@@ -1154,6 +1154,59 @@ impl<'a> Model<'a> {
         Ok(())
     }
 
+    /// Replaces a stretch of rows of a sheet, as a table of data loaded
+    /// again does: the `old_count` rows from `first_row` on become `rows`,
+    /// however many there are now. Each row is its cells with their column,
+    /// as for `SheetData::set_row`; a text is a shared string
+    /// (`intern_shared_string`).
+    ///
+    /// The stretch grows and shrinks by rows inserted or deleted inside it,
+    /// so a range over it, from its first row to its last, stretches and
+    /// shrinks with it as it does when rows are inserted by hand, and what
+    /// is below it moves. To keep rows inside it to do that with, it keeps
+    /// two rows at least: given fewer, the rest are left empty. When the
+    /// number of rows does not change, nothing moves, and an evaluation of
+    /// the changes (`evaluate_changes`) runs only what reads the stretch.
+    pub fn replace_rows(
+        &mut self,
+        sheet: u32,
+        first_row: i32,
+        old_count: i32,
+        rows: Vec<Vec<(i32, Cell)>>,
+    ) -> Result<(), String> {
+        self.workbook.worksheet(sheet)?;
+        let old_count = old_count.max(0);
+        let given = i32::try_from(rows.len()).map_err(|_| "Too many rows".to_string())?;
+        let count = given.max(old_count.min(2));
+        if first_row < 1 || first_row as i64 + count.max(old_count) as i64 - 1 > LAST_ROW as i64 {
+            return Err(format!(
+                "Rows {first_row} to {} are not in the sheet",
+                first_row as i64 + count.max(old_count) as i64 - 1
+            ));
+        }
+        if count > old_count {
+            // Before the last row, so that the ranges ending there stretch
+            let at = if old_count >= 2 {
+                first_row + old_count - 1
+            } else {
+                first_row + old_count
+            };
+            self.insert_rows(sheet, at, count - old_count)?;
+        } else if count < old_count {
+            // Inside, keeping the first and the last
+            self.delete_rows(sheet, first_row + 1, old_count - count)?;
+        }
+        let sheet_data = &mut self.workbook.worksheet_mut(sheet)?.sheet_data;
+        let mut rows = rows.into_iter();
+        for row in first_row..first_row + count {
+            match rows.next() {
+                Some(cells) => sheet_data.set_row(row, cells),
+                None => sheet_data.remove_row(row),
+            }
+        }
+        Ok(())
+    }
+
     /// Deletes one or more rows from the model starting at the specified index.
     ///
     /// # Arguments

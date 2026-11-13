@@ -380,6 +380,30 @@ impl<'a> UserModel<'a> {
         !self.history.redo_stack.is_empty()
     }
 
+    /// Replaces a stretch of rows of a sheet with rows of data loaded again:
+    /// see [Model::replace_rows]. It is not an edit: it cannot be undone,
+    /// the history kept so far is forgotten (it holds cells that are gone),
+    /// and it is not queued for [UserModel::flush_send_queue], since each
+    /// copy of a workbook loads its own data. Evaluates unless evaluation is
+    /// paused.
+    pub fn replace_rows(
+        &mut self,
+        sheet: u32,
+        first_row: i32,
+        old_count: i32,
+        rows: Vec<Vec<(i32, Cell)>>,
+    ) -> Result<(), String> {
+        self.model.replace_rows(sheet, first_row, old_count, rows)?;
+        self.history = History::default();
+        self.evaluate_if_not_paused();
+        Ok(())
+    }
+
+    /// See [Model::intern_shared_string].
+    pub fn intern_shared_string(&mut self, text: &str) -> i32 {
+        self.model.intern_shared_string(text)
+    }
+
     /// Whether edits are kept for [UserModel::undo] and [UserModel::redo]
     /// (they are unless said otherwise). Each edit is kept with the cells
     /// it replaced, so a workbook open for a long time keeps growing; an

@@ -3840,6 +3840,19 @@ impl<'a> Model<'a> {
         style
     }
 
+    /// The index of a text among the workbook's shared strings, the text
+    /// added if it is not there: what a `Cell::SharedString` holds, for
+    /// cells made outside the editing functions (`replace_rows`).
+    pub fn intern_shared_string(&mut self, text: &str) -> i32 {
+        if let Some(index) = self.shared_strings.get(text) {
+            return *index as i32;
+        }
+        let index = self.workbook.shared_strings.len();
+        self.workbook.shared_strings.push(text.to_string());
+        self.shared_strings.insert(text.to_string(), index);
+        index as i32
+    }
+
     /// What the workbook takes in memory, in bytes, as far as the model can
     /// tell from what it holds: the cells of each sheet, the texts they
     /// share and the record of what each formula read. An estimate from the sizes of its parts; the parsed formulas,
