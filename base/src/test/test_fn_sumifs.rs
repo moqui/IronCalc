@@ -150,3 +150,49 @@ fn test_fn_sumifs_whole_column_sees_a_spill_beyond_the_used_area() {
         assert_eq!(model.evaluation.restarts_in_last_evaluation, 1, "{formula}");
     }
 }
+
+#[test]
+fn a_text_met_many_times_is_judged_like_one_met_once() {
+    let mut model = new_empty_model();
+    // The same texts over and over, as constants and as results of formulas,
+    // in upper and lower case, among numbers, booleans and gaps
+    let texts = ["open", "Open", "closed", "OPEN", "opened", "closed"];
+    for row in 1..=60 {
+        let text = texts[(row as usize - 1) % texts.len()];
+        match row % 10 {
+            0 => model._set(&format!("A{row}"), &format!("=LOWER(\"{text}\")")),
+            3 => model._set(&format!("A{row}"), "7"),
+            5 => model._set(&format!("A{row}"), "TRUE"),
+            7 => {}
+            _ => model._set(&format!("A{row}"), text),
+        }
+        model._set(&format!("B{row}"), "1");
+        model._set(&format!("C{row}"), if row % 2 == 0 { "x" } else { "y" });
+    }
+    model._set("E1", "=SUMIFS(B1:B60,A1:A60,\"open\")");
+    model._set("E2", "=COUNTIF(A1:A60,\"open\")");
+    model._set("E3", "=COUNTIF(A1:A60,\"open*\")");
+    model._set("E4", "=COUNTIF(A1:A60,\"<>open\")");
+    model._set("E5", "=COUNTIFS(A1:A60,\"open\",C1:C60,\"x\")");
+    model._set("E6", "=SUMIFS(B1:B60,A1:A60,\"closed\",C1:C60,\"y\")");
+    model._set("E7", "=AVERAGEIFS(B1:B60,A1:A60,\">=o\")");
+    model._set("E8", "=COUNTIF(A1:A60,7)");
+    model._set("E9", "=COUNTIF(A1:A60,TRUE)");
+    model._set("E10", "=COUNTIF(A1:A60,\"\")");
+    // The same, counted one cell at a time
+    model._set("F1", "=SUMPRODUCT(--(A1:A60=\"open\"))");
+    model._set("F3", "=SUMPRODUCT(--(LEFT(A1:A60,4)=\"open\"))");
+    model._set("F5", "=SUMPRODUCT((A1:A60=\"open\")*(C1:C60=\"x\"))");
+    model._set("F6", "=SUMPRODUCT((A1:A60=\"closed\")*(C1:C60=\"y\"))");
+    model.evaluate();
+
+    assert_eq!(model._get_text("E1"), model._get_text("F1"));
+    assert_eq!(model._get_text("E2"), model._get_text("F1"));
+    assert_eq!(model._get_text("E3"), model._get_text("F3"));
+    assert_eq!(model._get_text("E5"), model._get_text("F5"));
+    assert_eq!(model._get_text("E6"), model._get_text("F6"));
+    let all: Vec<String> = (1..=10)
+        .map(|row| model._get_text(&format!("E{row}")))
+        .collect();
+    assert_eq!(all, ["24", "24", "28", "18", "20", "4", "1", "6", "6", "6"]);
+}

@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use crate::constants::{LAST_COLUMN, LAST_ROW};
+use crate::evaluation::KeyBuild;
 use crate::expressions::types::CellReferenceIndex;
 use crate::functions::util::build_criteria;
 use crate::{
@@ -6,10 +9,17 @@ use crate::{
     expressions::parser::{ArrayNode, Node},
     expressions::token::Error,
     model::Model,
+    types::Cell,
 };
 
 /// A compiled criterion predicate, as returned by `build_criteria`.
 type Criterion<'c> = Box<dyn Fn(&CalcResult) -> bool + 'c>;
+
+/// What a criterion said of each text it has met, by the index of the text
+/// among the shared strings. A column of text is the same few texts over and
+/// over, and whether a text meets a criterion depends on the text alone: it
+/// is decided once, not once per cell with a copy of the text each time.
+type TextVerdicts = HashMap<i32, bool, KeyBuild>;
 
 /// Converts a single array element into the equivalent scalar `CalcResult`,
 /// used to feed `build_criteria` from an inline-array criteria argument.
@@ -28,6 +38,37 @@ fn array_node_to_calc_result(node: &ArrayNode, cell: CellReferenceIndex) -> Calc
 }
 
 impl<'a> Model<'a> {
+    /// Whether what the cell at `position` holds meets the criterion. A
+    /// constant is read straight from the sheet, which is all `evaluate_cell`
+    /// would do with it, and a text is looked up in `texts` first.
+    fn cell_meets_criterion(
+        &mut self,
+        position: CellReferenceIndex,
+        criterion: &Criterion<'_>,
+        texts: &mut TextVerdicts,
+    ) -> bool {
+        // While a pass is being abandoned nothing is read: `evaluate_cell`
+        // knows what to answer.
+        if self.evaluation.restart.is_none() && !self.evaluation.unwinding {
+            match self.fetch_cell(position).as_deref() {
+                Some(Cell::NumberCell { v, .. }) => return criterion(&CalcResult::Number(*v)),
+                Some(Cell::BooleanCell { v, .. }) => return criterion(&CalcResult::Boolean(*v)),
+                Some(Cell::SharedString { si, .. }) => {
+                    if let Some(verdict) = texts.get(si) {
+                        return *verdict;
+                    }
+                    if let Some(text) = self.workbook.shared_strings.get(*si as usize) {
+                        let verdict = criterion(&CalcResult::String(text.clone()));
+                        texts.insert(*si, verdict);
+                        return verdict;
+                    }
+                }
+                _ => {}
+            }
+        }
+        criterion(&self.evaluate_cell(position))
+    }
+
     pub(crate) fn fn_countif(&mut self, args: &[Node], cell: CellReferenceIndex) -> CalcResult {
         if args.len() == 2 {
             let arguments = vec![args[0].clone(), args[1].clone()];
@@ -80,6 +121,7 @@ impl<'a> Model<'a> {
             fn_criteria.push(build_criteria(criterion, self.locale));
         }
 
+        let mut texts = vec![TextVerdicts::default(); case_count];
         let mut total = 0.0;
         let first_range = &ranges[0];
         let left_row = first_range.left.row;
@@ -160,13 +202,13 @@ impl<'a> Model<'a> {
                 for case_index in 0..case_count {
                     // We check if value in range n meets criterion n
                     let range = &ranges[case_index];
-                    let fn_criterion = &fn_criteria[case_index];
-                    let value = self.evaluate_cell(CellReferenceIndex {
+                    let position = CellReferenceIndex {
                         sheet: range.left.sheet,
                         row: range.left.row + row - first_range.left.row,
                         column: range.left.column + column - first_range.left.column,
-                    });
-                    if !fn_criterion(&value) {
+                    };
+                    let fn_criterion = &fn_criteria[case_index];
+                    if !self.cell_meets_criterion(position, fn_criterion, &mut texts[case_index]) {
                         is_true = false;
                         break;
                     }
@@ -252,17 +294,20 @@ impl<'a> Model<'a> {
             Err(message) => return Err(CalcResult::new_error(Error::ERROR, cell, message)),
         }
 
+        let mut texts = vec![TextVerdicts::default(); fn_criteria.len()];
         for row in left_row..right_row + 1 {
             for column in left_column..right_column + 1 {
                 let mut is_true = true;
-                for (range, fn_criterion) in ranges.iter().zip(fn_criteria.iter()) {
+                for ((range, fn_criterion), texts) in
+                    ranges.iter().zip(fn_criteria.iter()).zip(texts.iter_mut())
+                {
                     // We check if value in range n meets criterion n
-                    let value = self.evaluate_cell(CellReferenceIndex {
+                    let position = CellReferenceIndex {
                         sheet: range.left.sheet,
                         row: range.left.row + row - sum_range.left.row,
                         column: range.left.column + column - sum_range.left.column,
-                    });
-                    if !fn_criterion(&value) {
+                    };
+                    if !self.cell_meets_criterion(position, fn_criterion, texts) {
                         is_true = false;
                         break;
                     }
