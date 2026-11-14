@@ -155,6 +155,23 @@ impl Dependencies {
         self.ready = true;
     }
 
+    /// What `formula` read in its last run.
+    pub(crate) fn reads_of(&self, formula: CellKey) -> Vec<Rect> {
+        self.reads.get(&formula).cloned().unwrap_or_default()
+    }
+
+    /// Puts back what `formula` read, for a formula that did not run again.
+    pub(crate) fn restore(&mut self, formula: CellKey, reads: Vec<Rect>, volatile: bool) {
+        if volatile {
+            self.volatile.insert(formula);
+        }
+        if reads.is_empty() {
+            return;
+        }
+        self.reads.insert(formula, reads);
+        self.index(formula);
+    }
+
     /// Takes what `formula` read out of the index, before it runs again or
     /// after it is gone.
     pub(crate) fn forget(&mut self, formula: CellKey) {

@@ -39,7 +39,7 @@
 //! Nothing here depends on the order in which cells are visited, only the
 //! amount of work does.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::calc_result::CalcResult;
@@ -670,6 +670,42 @@ impl<'a> Model<'a> {
             before.push(cell);
         }
 
+        // The order of what they read, precedents first, from the reads of their last run: a formula whose
+        // precedents kept their values, whose reads were not written and that is not volatile keeps its value, and
+        // need not run, nor make its readers run (the early cutoff of issue 849)
+        let dirty: HashSet<CellKey, KeyBuild> = order.iter().copied().collect();
+        let mut dependents: HashMap<CellKey, Vec<CellKey>, KeyBuild> = HashMap::default();
+        let mut precedents: HashMap<CellKey, Vec<CellKey>, KeyBuild> = HashMap::default();
+        let mut found = Vec::new();
+        for formula in &order {
+            found.clear();
+            self.dependencies
+                .readers_of(&Rect::cell(*formula), &mut found);
+            found.sort_unstable();
+            found.dedup();
+            for reader in &found {
+                if reader != formula && dirty.contains(reader) {
+                    dependents.entry(*formula).or_default().push(*reader);
+                    precedents.entry(*reader).or_default().push(*formula);
+                }
+            }
+        }
+        let saved: HashMap<CellKey, (Vec<Rect>, bool), KeyBuild> = order
+            .iter()
+            .map(|formula| {
+                (
+                    *formula,
+                    (
+                        self.dependencies.reads_of(*formula),
+                        self.dependencies.volatile.contains(formula),
+                    ),
+                )
+            })
+            .collect();
+        let before: HashMap<CellKey, Option<Cell>, KeyBuild> =
+            order.iter().copied().zip(before).collect();
+        // Every one of them reads as not evaluated, so that a reference that comes to one of them now, which the
+        // reads of the last run do not show, evaluates it first
         for formula in &order {
             self.evaluation.cells.remove(formula);
             self.dependencies.forget(*formula);
@@ -686,26 +722,79 @@ impl<'a> Model<'a> {
         let circular_before = state.circular.len();
         self.clear_variable_stack();
         self.clear_lambdas();
-        for formula in &order {
-            let reference = reference_of(*formula);
-            if !matches!(
+        let mut waiting: HashMap<CellKey, usize, KeyBuild> = precedents
+            .iter()
+            .map(|(formula, list)| (*formula, list.len()))
+            .collect();
+        let mut ready: VecDeque<CellKey> = order
+            .iter()
+            .filter(|formula| !waiting.contains_key(*formula))
+            .copied()
+            .collect();
+        let mut changed: HashSet<CellKey, KeyBuild> = HashSet::default();
+        let mut ran: Vec<CellKey> = Vec::new();
+        let mut taken = 0;
+        while let Some(formula) = ready.pop_front() {
+            taken += 1;
+            let reference = reference_of(formula);
+            let is_formula = matches!(
                 self.fetch_cell(reference).as_deref(),
                 Some(Cell::CellFormula { .. })
-            ) {
-                continue;
+            );
+            if is_formula {
+                let (reads, volatile) = &saved[&formula];
+                let pulled = self.evaluation.cells.get(&formula) == Some(&CellState::Evaluated);
+                let must = pulled
+                    || *volatile
+                    || written.iter().any(|area| area.contains(formula))
+                    || reads
+                        .iter()
+                        .any(|read| written.iter().any(|area| area.intersects(read)))
+                    || precedents
+                        .get(&formula)
+                        .is_some_and(|list| list.iter().any(|p| changed.contains(p)));
+                if must {
+                    if !pulled {
+                        self.evaluation.root = Some(reference);
+                        self.evaluate_cell(reference);
+                        if self.evaluation.restart.is_some() {
+                            break;
+                        }
+                    }
+                    ran.push(formula);
+                    let after = self.fetch_cell(reference).map(|cell| cell.into_owned());
+                    if before.get(&formula) != Some(&after) {
+                        changed.insert(formula);
+                    }
+                } else {
+                    // It keeps its value, and what it read
+                    self.evaluation.cells.insert(formula, CellState::Evaluated);
+                    self.dependencies.restore(formula, reads.clone(), *volatile);
+                }
             }
-            self.evaluation.root = Some(reference);
-            self.evaluate_cell(reference);
-            if self.evaluation.restart.is_some() {
-                break;
+            for reader in dependents
+                .get(&formula)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                if let Some(count) = waiting.get_mut(reader) {
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.push_back(*reader);
+                    }
+                }
             }
         }
         self.evaluation.in_pass = false;
         self.evaluation.root = None;
-        if self.evaluation.restart.is_some() || self.evaluation.circular.len() != circular_before {
+        // A loop among them never empties the queue: a cycle, a full evaluation's business
+        if self.evaluation.restart.is_some()
+            || self.evaluation.circular.len() != circular_before
+            || taken < order.len()
+        {
             return self.evaluate_all_changes();
         }
-        for formula in &order {
+        for formula in &ran {
             self.dependencies.index(*formula);
         }
         self.evaluate_conditional_formatting();
@@ -721,14 +810,11 @@ impl<'a> Model<'a> {
                 height: area.row2 - area.row1 + 1,
             })
             .collect();
-        for (formula, before) in order.iter().zip(before) {
+        for formula in &order {
             if written.iter().any(|area| area.contains(*formula)) {
                 continue;
             }
-            let after = self
-                .fetch_cell(reference_of(*formula))
-                .map(|cell| cell.into_owned());
-            if after != before {
+            if changed.contains(formula) {
                 areas.push(Area {
                     sheet: formula.0,
                     row: formula.1,

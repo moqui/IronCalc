@@ -100,6 +100,33 @@ fn a_formula_whose_value_stays_is_run_but_not_reported() {
 }
 
 #[test]
+fn what_reads_a_formula_whose_value_stayed_does_not_run() {
+    let mut model = new_empty_model();
+    model._set("A1", "1");
+    model._set("B1", "=IF(A1>0,\"positive\",\"not\")");
+    model._set("C1", "=B1&\"!\"");
+    model._set("D1", "=C1&\"?\"");
+    model._set("E1", "=A1*2");
+    model.evaluate();
+
+    // B1 and E1 read A1; B1 stays, so C1 and D1 do not run
+    let changes = edit(&mut model, "A1", "2");
+    assert_eq!(changes.formulas_run, 2);
+    assert_eq!(changes.areas, vec![cell(0, 1, 1), cell(0, 1, 5)]);
+    assert_eq!(model._get_text("D1"), *"positive!?");
+    // Again, with what the ones that did not run read put back
+    let changes = edit(&mut model, "A1", "3");
+    assert_eq!(changes.formulas_run, 2);
+    // B1 changes: everything down from it runs
+    let changes = edit(&mut model, "A1", "-1");
+    assert_eq!(changes.formulas_run, 4);
+    assert_eq!(model._get_text("D1"), *"not!?");
+    let changes = edit(&mut model, "C1", "=B1&\"#\"");
+    assert_eq!(changes.formulas_run, 2);
+    assert_eq!(model._get_text("D1"), *"not#?");
+}
+
+#[test]
 fn ranges_whole_columns_and_criteria() {
     let mut model = new_empty_model();
     for row in 1..=20 {
